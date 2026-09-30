@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "habitfocus",
+  "version": "0.1.0",
+  "description": "Blocks distracting sites until you finish your habits. Needs the habitfocus daemon (hf install-native-host).",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuIXy4b/Sg4ytZ96tMTw6Gor1S81p2PdJ4qDkrA24gWHKDzZ7TfZ8U6WOYr8B7Lgd68i1/CVVulxcgpVVbsUdpxmqR3MMGJf0ARu+2G1ZUwYxjVOqkPo3/pgz8cMop47+bg9EjBjTwRB0cwYJjVBCWdzeZlxSJWAIhGOGAOSlSMFMZW9bB3m3QzEEx9mVrTz3RJhMbii1mB8A+HEL1kK8uskYuDx/YVI6nLD38YSwcIq4TboJF0rJMZrCw66nwH9t7y4Qxrtqkjm04cLGkNmqctwL5C0qiT6nA7XGChbgbmyWAc/Bo8OTqvN4ie89uSKJqu/WjMZS5lcnsNDjhsFlRQIDAQAB",
+  "permissions": ["nativeMessaging", "tabs", "webNavigation", "storage"],
+  "background": {
+    "service_worker": "background.js",
+    "scripts": ["background.js"]
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "habitfocus@habitfocus.dev",
+      "strict_min_version": "121.0",
+      "update_url": "https://github.com/TheYoyoyfreak/habitfocus/releases/latest/download/updates.json",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
+    }
+  }
+}

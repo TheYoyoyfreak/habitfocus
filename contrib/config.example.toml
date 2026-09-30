@@ -1,0 +1,178 @@
+# habitfocus configuration: ~/.config/habitfocus/config.toml
+# Durations accept "90s", "20m", "1h30m" or a bare number of minutes.
+# Apply changes with `hf reload`.
+
+[general]
+# A running session pauses after this much keyboard/mouse inactivity
+# (idle detection needs a daemon restart to pick up changes).
+idle_timeout = "90s"
+# After an emergency abort of a strict session, unlocks are refused this long.
+emergency_penalty = "1h"
+# Notify this long before an unlock ends.
+expiry_warning = "1m"
+# Strict sessions never pull focus away from these app ids.
+strict_exempt_apps = []
+notifications = true
+# Sound when a timed habit reaches its target: a sound name from the system
+# theme ("complete", "bell", "message"), a path to a file, or "" for silence.
+sound = "complete"
+# When a new day starts (local time). Progress of stopped sessions is kept
+# until then; a late session from 23:40 to 00:20 still counts for the evening.
+day_start = "04:00"
+# During a commitment lock (`hf lock 7d`), windows of these browsers are closed
+# while the habitfocus extension isn't running in them.
+browsers = ["zen", "firefox", "google-chrome", "brave-browser", "helium"]
+# Days of per-app screen time to keep (`hf apps`, the TUI Insights pane).
+screen_time_days = 60
+# Screen time in a terminal goes to the program in front (nvim, claude, …,
+# followed through tmux) instead of to the terminal.
+terminal_programs = true
+# Terminal app ids (the default list, compared ignoring case).
+terminals = ["kitty", "Alacritty", "foot", "footclient", "com.mitchellh.ghostty", "org.wezfurlong.wezterm",
+             "org.gnome.Ptyxis", "org.gnome.Console", "org.kde.konsole", "xterm", "org.omarchy.terminal"]
+# Terminals and their programs are in the category "Terminal", browsers and
+# sites in "Browser", unless [app_categories] says otherwise.
+auto_categories = true
+# habitd looks for a new release on GitHub once a day; `hf tui` and
+# `hf status` then mention it, and `hf update` installs it.
+update_check = true
+
+# ---- Block groups -------------------------------------------------------
+# Everything in a group stays blocked until you spend credit on it.
+# Find app ids with `niri msg windows` (niri) or `hyprctl clients`, the `class` field (Hyprland).
+
+[groups.social]
+name = "Social"
+apps = ["vesktop", "org.telegram.desktop"]
+# Process names (/proc/<pid>/comm) are terminated as well.
+processes = []
+# Websites, including their subdomains, blocked by the browser extension.
+domains = ["youtube.com", "reddit.com", "x.com", "instagram.com"]
+# How spent credit unlocks the group:
+#   "wallclock"   (default) the unlock runs on the clock, used or not
+#   "usage"       a budget of actual use: it only runs down while one of the
+#                 group's apps or sites is focused (and you're not idle)
+#   "rest_of_day" unlocked until the day ends, for rest_of_day_price
+# Unspent credit and usage budgets expire when a new day starts (day_start).
+unlock_mode = "usage"
+# Optional: habits that must be completed today before the group can be
+# unlocked at all. `require = "any"` (default) needs one of them, "all" every
+# one. Immediate rewards for a group that's still waiting are banked instead.
+requires = ["reading", "journal"]
+require = "any"
+
+[groups.games]
+name = "Games"
+apps = ["steam"]
+processes = ["steam"]
+# Optional: block only inside these local-time windows (without a schedule a
+# group blocks around the clock). Ranges ending before they start run past
+# midnight ("22:00-02:00" on mon covers mon 22:00 to tue 02:00); equal ends
+# cover a whole day. Outside the windows nothing is blocked and unlocking is
+# refused, so no credit is wasted.
+schedule = [
+  { days = ["mon", "tue", "wed", "thu", "fri"], ranges = ["08:00-12:00", "13:00-18:00"] },
+  { days = ["sun"], ranges = ["20:00-02:00"] },
+]
+
+# ---- App names ----------------------------------------------------------
+# Readable names for app ids and sites in screen time, `hf apps` and the TUI
+# (set them with `r` in the Insights pane or `hf rename`). Only labels:
+# blocking always matches the id.
+# [app_names]
+# steam_app_275850 = "No Man's Sky"
+# "site:www.youtube.com" = "YouTube"
+# "term:btop" = "btop"
+#
+# Categories group screen time (`g` in the Insights pane, `hf apps
+# --by-category`); set them with `c` there or `hf category`.
+# [app_categories]
+# steam_app_275850 = "Games"
+# "site:www.youtube.com" = "Video"
+
+# ---- Habits -------------------------------------------------------------
+# The timer only runs while a window matching `allow` is focused and you're
+# not idle. Rules match on `app` (app id), `title` (regex), `url` (regex on
+# the active tab URL; needs the browser extension), `program` (what runs in
+# front in a terminal, followed through tmux: "nvim", as `hf apps` shows it
+# after `term:`) and/or `tmux_session` (the name of the tmux session shown in
+# the terminal, exact).
+# strictness: "soft" pauses when you leave, "strict" pulls focus back.
+# reward.mode: "bank" stores credit for `hf unlock`, "immediate" unlocks now.
+# kind: "apps" (default), "timer", "manual" or "counter" (see below).
+# on_target: "finish" completes at the target and ends the session (default for
+# apps), "ask" banks the reward at every full target and keeps the session
+# running for another round until you stop (default for timers).
+# Stopping a session (`hf stop`, `s` in the TUI) keeps its progress for today.
+
+[habits.reading]
+name = "Reading"
+target = "20m"
+strictness = "strict"
+allow = [
+  { app = "org.pwmt.zathura" },
+  { app = "com.github.johnfactotum.Foliate" },
+]
+reward = { groups = ["social"], duration = "1h", mode = "bank" }
+
+# Timer habits are for things away from the screen, like a paper book: the
+# timer counts while `hf tui` is focused and ignores keyboard/mouse inactivity.
+# Strict timers pull focus back to the TUI.
+[habits.book]
+name = "Paper book"
+kind = "timer"
+target = "20m"
+strictness = "soft"
+reward = { groups = ["social"], duration = "1h", mode = "bank" }
+
+[habits.wiki]
+name = "Learn something"
+target = "15m"
+strictness = "soft"
+allow = [{ app = "zen", url = "^https://[a-z]+\\.wikipedia\\.org/" }]
+reward = { groups = ["games"], duration = "30m", mode = "immediate" }
+
+[habits.notes]
+name = "Notes"
+target = "25m"
+strictness = "soft"
+# Only while nvim is in front: another tmux pane or window pauses it.
+allow = [{ app = "kitty", program = "nvim" }]
+# Or anything in the tmux session "notes":
+# allow = [{ tmux_session = "notes" }]
+reward = { groups = ["social"], duration = "30m", mode = "bank" }
+
+# Passive habits count by themselves all day, like a step counter: no session,
+# their time adds up while a window matching `allow` is focused and you're not
+# idle. `target` is an optional daily goal (reaching it completes the habit and
+# pays the reward, which is optional too); without it the habit is only tracked.
+[habits.coding]
+name = "Coding"
+kind = "passive"
+target = "2h"
+allow = [{ app = "dev.zed.Zed" }, { program = "nvim" }]
+reward = { groups = ["social"], duration = "30m" }
+
+[habits.agents]
+name = "AI agents"
+kind = "passive"
+allow = [{ program = "claude" }, { program = "codex" }]
+
+# Manual and counter habits have no timer: you log them yourself with
+# `hf done <habit> [amount]` (or enter / + / - in the TUI). A manual habit is
+# done or not and pays once a day. A counter pays one reward per full `goal`
+# (at most `daily_limit` rounds a day, unlimited by default). `hf done anki -5`
+# corrects a mistake, `hf done anki 40 --set` sets today's count; neither takes
+# back rewards already earned.
+[habits.journal]
+name = "Journal"
+kind = "manual"
+reward = { groups = ["social"], duration = "15m" }
+
+[habits.pushups]
+name = "Push-ups"
+kind = "counter"
+goal = 50
+unit = "reps"
+daily_limit = 2
+reward = { groups = ["games"], duration = "20m" }

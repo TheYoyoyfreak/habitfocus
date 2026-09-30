@@ -1,0 +1,102 @@
+# Builds a release when a version tag is pushed: git tag v0.2.0 && git push origin v0.2.0
+# Tags with a suffix (v0.2.0-rc.1) become pre-releases; they aren't "latest",
+# so install.sh and `hf update` ignore them, and their extension isn't signed
+# (addons.mozilla.org signs each version only once).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Versions match the tag
+        run: contrib/check-version.sh "$GITHUB_REF_NAME"
+
+  build:
+    needs: check
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: mlugg/setup-zig@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      # Static binaries: zig links musl and builds the bundled SQLite for both targets.
+      - run: cargo zigbuild --release --locked --target ${{ matrix.target }} -p habitd -p hf
+      - run: contrib/package-release.sh ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*.tar.gz
+
+  extension:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Firefox (signed as unlisted on addons.mozilla.org)
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        run: |
+          mkdir -p dist
+          case "$GITHUB_REF_NAME" in *-*) prerelease=1 ;; *) prerelease= ;; esac
+          if [ -n "$AMO_JWT_ISSUER" ] && [ -z "$prerelease" ]; then
+            npx --yes web-ext@8 sign --channel=unlisted --source-dir extension --artifacts-dir web-ext \
+              --api-key "$AMO_JWT_ISSUER" --api-secret "$AMO_JWT_SECRET"
+            mv web-ext/*.xpi dist/habitfocus-firefox.xpi
+          else
+            echo "::warning::not signing the extension (pre-release, or no AMO_JWT_* secrets)"
+            contrib/package-extension.sh
+            mv dist/habitfocus.xpi dist/habitfocus-firefox-unsigned.xpi
+          fi
+      - name: Chromium
+        run: cd extension && zip -qr ../dist/habitfocus-chromium.zip .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: extension
+          path: dist/*
+
+  publish:
+    needs: [build, extension]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Installer, Firefox update manifest and checksums
+        run: |
+          cp contrib/install.sh dist/
+          version=${GITHUB_REF_NAME#v}
+          if [ -f dist/habitfocus-firefox.xpi ]; then
+            # Firefox checks this (manifest.json update_url) to update the add-on.
+            cat > dist/updates.json <<EOF
+          {"addons": {"habitfocus@habitfocus.dev": {"updates": [{"version": "$version",
+            "update_link": "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/habitfocus-firefox.xpi"}]}}}
+          EOF
+          fi
+          cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          case "$GITHUB_REF_NAME" in *-*) flag=--prerelease ;; *) flag=--latest ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes $flag

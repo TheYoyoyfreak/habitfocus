@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Locked · habitfocus</title>
+  <link rel="stylesheet" href="blocked.css">
+</head>
+<body>
+  <main>
+    <p class="eyebrow">habitfocus</p>
+    <h1 id="headline">Locked</h1>
+    <p id="lead" class="lead"></p>
+
+    <section id="session" hidden>
+      <div class="row">
+        <span id="session-name"></span>
+        <span id="session-time" class="mono"></span>
+      </div>
+      <div class="bar"><div id="session-progress"></div></div>
+      <p id="session-status" class="muted"></p>
+    </section>
+
+    <section id="groups"></section>
+    <section id="habits"></section>
+
+    <p id="notice" class="notice" hidden></p>
+    <p id="offline" class="notice" hidden>
+      habitd is not reachable. Blocking continues with the last known rules.
+    </p>
+  </main>
+  <script src="blocked.js"></script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/habit-core", "crates/habit-ipc", "crates/habitd", "crates/hf"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+habit-core = { path = "crates/habit-core" }
+habit-ipc = { path = "crates/habit-ipc" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "process", "sync", "time", "signal"] }
+toml = "0.8"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+
+[profile.release]
+# Small static release binaries.
+lto = true
+strip = true
