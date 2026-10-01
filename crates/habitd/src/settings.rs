@@ -45,6 +45,7 @@ pub fn apply(text: &str, key: &str, raw: &str) -> Result<(String, Config), Strin
     }
     let updated = doc.to_string();
     let config = Config::from_toml(&updated)?;
+    config.check_lockout(Config::from_toml(text).ok().as_ref())?;
     Ok((updated, config))
 }
 

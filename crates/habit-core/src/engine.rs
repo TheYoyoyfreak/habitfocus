@@ -804,18 +804,17 @@ impl Engine {
         self.is_group_scheduled(group, now) && !self.is_group_unlocked(group, now)
     }
 
+    /// Terminals are never blocked, whatever the config says: you'd have no
+    /// way left to run `hf` and unlock.
     pub fn is_app_blocked(&self, app_id: &str, now: u64) -> bool {
-        self.config
-            .groups
-            .iter()
-            .any(|(id, g)| g.matches_app(app_id) && self.is_group_blocking(id, now))
+        !self.config.is_protected_app(app_id)
+            && self.config.groups.iter().any(|(id, g)| g.matches_app(app_id) && self.is_group_blocking(id, now))
     }
 
+    /// Neither are habitfocus, shells or the desktop (`PROTECTED_PROCESSES`).
     pub fn is_process_blocked(&self, comm: &str, now: u64) -> bool {
-        self.config
-            .groups
-            .iter()
-            .any(|(id, g)| g.matches_process(comm) && self.is_group_blocking(id, now))
+        !Config::is_protected_process(comm)
+            && self.config.groups.iter().any(|(id, g)| g.matches_process(comm) && self.is_group_blocking(id, now))
     }
 
     pub fn blocked_domains(&self, now: u64) -> BTreeSet<String> {
@@ -2275,6 +2274,20 @@ mod tests {
         assert!(!fx.contains(&Effect::CloseWindow(3)));
         assert!(e.is_process_blocked("Discord", 0));
         assert!(e.blocked_domains(0).contains("reddit.com"));
+    }
+
+    #[test]
+    fn terminals_and_habitfocus_are_never_blocked() {
+        let config = "[groups.all]\napps = [\"kitty\", \"discord\"]\nprocesses = [\"hf\", \"habitd\", \"bash\", \"steam\"]";
+        let mut e = Engine::new(Config::from_toml(config).unwrap(), State::default());
+        let fx = e.handle(Input::WindowChanged(win(3, "kitty")), 0);
+        assert!(!fx.contains(&Effect::CloseWindow(3)), "{fx:?}");
+        let fx = e.handle(Input::WindowChanged(win(4, "discord")), 0);
+        assert!(fx.contains(&Effect::CloseWindow(4)), "{fx:?}");
+        for comm in ["hf", "habitd", "bash"] {
+            assert!(!e.is_process_blocked(comm, 0), "{comm}");
+        }
+        assert!(e.is_process_blocked("steam", 0));
     }
 
     #[test]

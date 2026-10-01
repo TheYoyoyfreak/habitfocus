@@ -212,6 +212,10 @@ impl Daemon {
             }
         };
 
+        // Loaded anyway so habitd still runs; the engine skips these.
+        for entry in config.lockout_entries() {
+            eprintln!("habitd: ignoring: {entry}");
+        }
         let mut engine = Engine::new(config, state).with_local_offset(local_offset_ms);
         engine.backfill_day_stats();
         if let Some(pending) = pending {
@@ -311,6 +315,7 @@ impl Daemon {
         let file = read_config_text(&self.config_path).map_err(|e| format!("{e:#}"))?;
         let Some(baseline) = self.engine.lock_baseline(now).map(str::to_string) else {
             let config = Config::from_toml(&file).map_err(|e| format!("invalid config: {e}"))?;
+            config.check_lockout(Some(self.engine.config())).map_err(|e| format!("invalid config: {e}"))?;
             let effects = self.engine.reload(config, now);
             self.config_text = file;
             self.apply(effects, now);

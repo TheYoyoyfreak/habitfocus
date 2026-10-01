@@ -177,6 +177,7 @@ pub fn apply(
     }
     let updated = doc.to_string();
     let config = Config::from_toml(&updated)?;
+    config.check_lockout(Config::from_toml(text).ok().as_ref())?;
     Ok((updated, config))
 }
 
@@ -223,6 +224,7 @@ pub fn set_app_label(text: &str, table: &str, app: &str, name: Option<&str>) -> 
     }
     let updated = doc.to_string();
     let config = Config::from_toml(&updated)?;
+    config.check_lockout(Config::from_toml(text).ok().as_ref())?;
     Ok((updated, config))
 }
 
@@ -303,6 +305,22 @@ reward = { groups = ["social", "games"], duration = "1h" }
         // A config without [habits] yet gets one without an empty header.
         let (updated, _) = apply("", "groups", "x", Some(&obj(json!({ "apps": ["steam"] }))), true).unwrap();
         assert_eq!(updated.trim(), "[groups.x]\napps = [\"steam\"]");
+    }
+
+    #[test]
+    fn refuses_blocking_the_terminal() {
+        let mut social = entry("groups", "social");
+        social.insert("apps".into(), json!(["discord", "kitty"]));
+        let err = apply(TEXT, "groups", "social", Some(&social), false).unwrap_err();
+        assert!(err.contains("can't block the terminal \"kitty\""), "{err}");
+        let new = obj(json!({ "processes": ["hf"] }));
+        assert!(apply(TEXT, "groups", "x", Some(&new), true).unwrap_err().contains("\"hf\""));
+
+        // A config that already has one stays editable, so it can be fixed.
+        let old = TEXT.replace(r#"apps = ["discord"]"#, r#"apps = ["discord", "kitty"]"#);
+        assert!(set_app_label(&old, "app_names", "steam", Some("Steam")).is_ok());
+        let (_, config) = apply(&old, "groups", "social", Some(&entry("groups", "social")), false).unwrap();
+        assert!(config.lockout_entries().is_empty());
     }
 
     #[test]

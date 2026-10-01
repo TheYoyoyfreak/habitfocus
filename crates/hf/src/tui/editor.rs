@@ -466,7 +466,13 @@ impl Editor {
                 let value = match (suggest, key.strip_prefix("site:")) {
                     (Suggest::Sites, Some(host)) => host.strip_prefix("www.").unwrap_or(host).to_string(),
                     // Programs in terminals aren't windows: rules can't match them.
-                    (Suggest::Apps, None) if !key.starts_with(habit_core::config::TERMINAL_PREFIX) => key.clone(),
+                    // Terminals can't be blocked: hf runs in them.
+                    (Suggest::Apps, None)
+                        if !key.starts_with(habit_core::config::TERMINAL_PREFIX)
+                            && !habit_core::config::DEFAULT_TERMINALS.iter().any(|t| t.eq_ignore_ascii_case(key)) =>
+                    {
+                        key.clone()
+                    }
                     _ => return None,
                 };
                 Some((value, *per_day))
@@ -800,7 +806,7 @@ mod tests {
         go_to(&mut e, Row::Add { field: 1 });
         e.handle_key(key(KeyCode::Char('a')));
         let picker = e.picker.clone().unwrap();
-        assert_eq!(e.suggestions(&picker).iter().map(|s| s.0.as_str()).collect::<Vec<_>>(), ["kitty", "steam_app_275850"]);
+        assert_eq!(e.suggestions(&picker).iter().map(|s| s.0.as_str()).collect::<Vec<_>>(), ["steam_app_275850"], "not the terminal");
         // Found by its display name too, and added by id.
         typed(&mut e, "man's");
         e.handle_key(key(KeyCode::Enter));

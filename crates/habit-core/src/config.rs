@@ -79,6 +79,37 @@ pub const DEFAULT_TERMINALS: &[&str] = &[
     "org.omarchy.terminal",
 ];
 
+/// Processes blocks never terminate: habitfocus itself, the terminals,
+/// multiplexers and shells it runs in, and the desktop. Blocking one would
+/// leave no way to run `hf` and unlock.
+pub const PROTECTED_PROCESSES: &[&str] = &[
+    "hf",
+    "habitd",
+    "tmux",
+    "tmux: server",
+    "tmux: client",
+    "zellij",
+    "screen",
+    "bash",
+    "zsh",
+    "fish",
+    "sh",
+    "nu",
+    "kitty",
+    "alacritty",
+    "foot",
+    "footclient",
+    "ghostty",
+    "wezterm-gui",
+    "ptyxis",
+    "kgx",
+    "konsole",
+    "xterm",
+    "systemd",
+    "Hyprland",
+    "niri",
+];
+
 /// Prefix of the screen-time key of a program in a terminal: `term:nvim`.
 pub const TERMINAL_PREFIX: &str = "term:";
 /// Category of terminals and their programs with `auto_categories`.
@@ -788,6 +819,41 @@ impl Config {
         self.habits.values().any(|h| h.allow.iter().any(|r| r.program.is_some() || r.tmux_session.is_some()))
     }
 
+    /// Whether windows of `app_id` are never closed by a block: terminals,
+    /// where `hf` runs, configured or known out of the box.
+    pub fn is_protected_app(&self, app_id: &str) -> bool {
+        self.is_terminal(app_id) || DEFAULT_TERMINALS.iter().any(|t| t.eq_ignore_ascii_case(app_id))
+    }
+
+    /// Whether a process is never terminated by a block.
+    pub fn is_protected_process(comm: &str) -> bool {
+        PROTECTED_PROCESSES.iter().any(|p| p.eq_ignore_ascii_case(comm))
+    }
+
+    /// Block entries that would lock you out (terminals, habitfocus itself,
+    /// shells, the desktop). Blocks skip them; saving a config refuses them.
+    pub fn lockout_entries(&self) -> Vec<String> {
+        let mut found = Vec::new();
+        for (id, group) in &self.groups {
+            for app in group.apps.iter().filter(|a| self.is_protected_app(a)) {
+                found.push(format!("block {id:?} can't block the terminal {app:?}: you need it to run hf and unlock"));
+            }
+            for process in group.processes.iter().filter(|p| Self::is_protected_process(p)) {
+                found.push(format!("block {id:?} can't block the process {process:?}: unlocking needs it"));
+            }
+        }
+        found
+    }
+
+    /// Refuses a config whose blocks would lock you out (`lockout_entries`),
+    /// unless `before` (the config it replaces) already had them: a config
+    /// that has them can still be edited, and fixed.
+    pub fn check_lockout(&self, before: Option<&Config>) -> Result<(), String> {
+        let known = before.map(Config::lockout_entries).unwrap_or_default();
+        let new: Vec<String> = self.lockout_entries().into_iter().filter(|e| !known.contains(e)).collect();
+        if new.is_empty() { Ok(()) } else { Err(new.join("; ")) }
+    }
+
     pub fn is_terminal(&self, app_id: &str) -> bool {
         self.general.terminals.iter().any(|t| t.eq_ignore_ascii_case(app_id))
     }
@@ -1047,6 +1113,23 @@ mod tests {
         assert!(rule.matches("kitty", "", None, TerminalFront { program: None, tmux_session: Some("my thesis") }));
         assert!(!rule.matches("kitty", "", None, TerminalFront::default()));
         assert_eq!(rule.describe(), "tmux session my thesis");
+    }
+
+    #[test]
+    fn blocking_what_unlocks_is_refused() {
+        let config = Config::from_toml(
+            "[general]\nterminals = [\"my-term\"]\n[groups.g]\napps = [\"steam\", \"KITTY\", \"my-term\"]\nprocesses = [\"hf\", \"tmux: server\", \"steam\"]",
+        )
+        .expect("loading stays possible, so habitd still starts");
+        assert!(config.is_protected_app("kitty") && config.is_protected_app("my-term"));
+        assert!(!config.is_protected_app("steam"));
+        let entries = config.lockout_entries();
+        assert_eq!(entries.len(), 4, "{entries:?}");
+        assert!(entries[0].contains("\"KITTY\"") && entries[2].contains("\"hf\""), "{entries:?}");
+        let clean = Config::from_toml("[groups.g]\napps = [\"steam\"]").unwrap();
+        assert!(clean.check_lockout(None).is_ok());
+        assert!(config.check_lockout(Some(&clean)).is_err(), "adding them is refused");
+        assert!(config.check_lockout(Some(&config)).is_ok(), "keeping old ones isn't");
     }
 
     #[test]
