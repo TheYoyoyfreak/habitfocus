@@ -153,6 +153,11 @@ pub struct App {
     pub editor: Option<Editor>,
     /// Why the timer can't track focus in this terminal, if it can't.
     pub timer_warning: Option<String>,
+    /// How this terminal shows pictures (the sundial); `None` draws text only.
+    pub picker: Option<ratatui_image::picker::Picker>,
+    /// The last sundial picture and what it was drawn from, since drawing
+    /// happens every frame but the dial rarely changes.
+    pub dial: std::cell::RefCell<Option<(u64, ratatui_image::protocol::Protocol)>>,
     /// (habit, goal) whose goal-reached prompt was dismissed.
     dismissed_goal: Option<(String, u64)>,
     /// `events_seq` of the last snapshot, to refetch the log when it moves.
@@ -182,6 +187,8 @@ impl App {
             popup: None,
             editor: None,
             timer_warning: None,
+            picker: None,
+            dial: std::cell::RefCell::new(None),
             dismissed_goal: None,
             events_seq: None,
             flash: None,
@@ -1115,6 +1122,8 @@ pub(crate) mod tests {
             longest_session_ms: 60_000,
             hours: vec![0; 24],
             hours_today: vec![0; 24],
+            days_ms: Vec::new(),
+            days_sessions: Vec::new(),
         }];
         app.handle_key(key(KeyCode::Char('4')));
         assert_eq!(app.handle_key(key(KeyCode::Char('r'))), Action::None);

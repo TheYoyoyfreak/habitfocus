@@ -5,6 +5,7 @@
 //! few seconds while focused so a killed TUI stops counting.
 
 mod app;
+mod dial;
 mod editor;
 mod form;
 mod panes;
@@ -165,6 +166,8 @@ pub fn run() -> anyhow::Result<()> {
 
     let mut app = App::new();
     app.timer_warning = focus_tracking_problem();
+    // Asks the terminal how it shows pictures; must come before reading keys.
+    app.picker = Some(ratatui_image::picker::Picker::from_query_stdio().unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks()));
     let mut focus = FocusReporter {
         source: format!("tui-{}", std::process::id()),
         enabled: app.timer_warning.is_none(),

@@ -92,6 +92,13 @@ pub fn sum_hours<'a>(hours: impl IntoIterator<Item = &'a Vec<u64>>) -> Vec<u64> 
     sum
 }
 
+/// Two per-day series added up; the shorter one counts as zero where it ends.
+pub fn sum_series<T: Copy + Default + std::ops::Add<Output = T>>(a: &[T], b: &[T]) -> Vec<T> {
+    (0..a.len().max(b.len()))
+        .map(|i| a.get(i).copied().unwrap_or_default() + b.get(i).copied().unwrap_or_default())
+        .collect()
+}
+
 /// How to show a screen-time key: its name from `[app_names]`, else the host
 /// of a `site:` key or the program of a `term:` key, else the app id.
 pub fn app_display(names: &std::collections::BTreeMap<String, String>, key: &str) -> String {
@@ -125,6 +132,10 @@ pub struct UsageRow {
     pub hours: Vec<u64>,
     /// The same for today alone.
     pub hours_today: Vec<u64>,
+    /// Use per day over the period, oldest first.
+    pub days_ms: Vec<u64>,
+    /// Sessions started per day over the period, oldest first.
+    pub days_sessions: Vec<u32>,
 }
 
 impl UsageRow {
@@ -138,6 +149,17 @@ impl UsageRow {
         self.longest_session_ms = self.longest_session_ms.max(other.longest_session_ms);
         self.hours = sum_hours([&self.hours, &other.hours]);
         self.hours_today = sum_hours([&self.hours_today, &other.hours_today]);
+        self.days_ms = sum_series(&self.days_ms, &other.days_ms);
+        self.days_sessions = sum_series(&self.days_sessions, &other.days_sessions);
+    }
+
+    /// The category this row's time counts under in the week chart: its own
+    /// label for a category row.
+    pub fn group(&self) -> &str {
+        match &self.key {
+            None => &self.label,
+            Some(_) => self.category.as_deref().unwrap_or(UNCATEGORIZED),
+        }
     }
 
     /// Whether `filter` (lowercase) appears in the key, name or category.
@@ -174,6 +196,8 @@ pub fn usage_rows(
             longest_session_ms: a.longest_session_ms,
             hours: a.hours.clone(),
             hours_today: a.hours_today.clone(),
+            days_ms: a.days_ms.clone(),
+            days_sessions: a.days_sessions.clone(),
         })
         .filter(|row| row.matches(&filter));
     if !by_category {
@@ -197,6 +221,29 @@ pub fn usage_total(rows: &[UsageRow], label: &str) -> UsageRow {
         total.add(row);
     }
     total
+}
+
+/// Each day's use split by category, oldest first: `(category, ms)` with the
+/// biggest first. Rows may be apps or whole categories.
+pub fn week_stacks(rows: &[UsageRow]) -> Vec<Vec<(String, u64)>> {
+    let days = rows.iter().map(|r| r.days_ms.len()).max().unwrap_or(0);
+    (0..days)
+        .map(|day| {
+            let mut parts: Vec<(String, u64)> = Vec::new();
+            for row in rows {
+                let ms = row.days_ms.get(day).copied().unwrap_or(0);
+                if ms == 0 {
+                    continue;
+                }
+                match parts.iter_mut().find(|(group, _)| group == row.group()) {
+                    Some(part) => part.1 += ms,
+                    None => parts.push((row.group().to_string(), ms)),
+                }
+            }
+            parts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            parts
+        })
+        .collect()
 }
 
 pub fn streak_label(days: u32) -> String {
@@ -271,6 +318,8 @@ mod tests {
             longest_session_ms: avg,
             hours: vec![1; 24],
             hours_today: vec![1; 24],
+            days_ms: vec![total_ms / 2, total_ms - total_ms / 2],
+            days_sessions: vec![0, sessions],
         }
     }
 
@@ -293,8 +342,22 @@ mod tests {
         let games = &groups[1];
         assert_eq!((games.total_ms, games.sessions, games.avg_session_ms, games.key.clone()), (900, 3, 300, None));
         assert_eq!(games.hours[0], 2);
+        assert_eq!((games.days_ms.clone(), games.days_sessions.clone()), (vec![450, 450], vec![0, 3]));
         let total = usage_total(&groups, "All");
         assert_eq!((total.total_ms, total.sessions), (1900, 6));
+        assert_eq!(total.days_ms, [950, 950]);
+    }
+
+    #[test]
+    fn week_stacks_by_category() {
+        let apps = [usage("steam_app_1", 600, 2, 300), usage("steam_app_2", 300, 1, 300), usage("kitty", 1000, 3, 300)];
+        let categories = [("steam_app_1".to_string(), "Games".to_string()), ("steam_app_2".to_string(), "Games".to_string())].into();
+        let names = Default::default();
+        let by_app = week_stacks(&usage_rows(&apps, &names, &categories, "", false));
+        let by_category = week_stacks(&usage_rows(&apps, &names, &categories, "", true));
+        assert_eq!(by_app, by_category);
+        assert_eq!(by_app[1], [(UNCATEGORIZED.to_string(), 500), ("Games".to_string(), 450)]);
+        assert_eq!(sum_series(&[1, 2], &[3]), [4, 2]);
     }
 
     #[test]

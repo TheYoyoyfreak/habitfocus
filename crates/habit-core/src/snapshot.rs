@@ -77,6 +77,13 @@ pub struct AppUsageView {
     /// The same for today alone.
     #[serde(default)]
     pub hours_today: Vec<u64>,
+    /// Use per logical day over the period, oldest first (one entry per day).
+    #[serde(default)]
+    pub days_ms: Vec<u64>,
+    /// Sessions started per day over the period, oldest first (none without
+    /// an archive).
+    #[serde(default)]
+    pub days_sessions: Vec<u32>,
 }
 
 /// How an hour of the day was spent: one slice per habit, category or app.

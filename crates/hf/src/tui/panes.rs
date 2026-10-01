@@ -1,6 +1,7 @@
 //! The five panes: Today, Blocks, Habits, Insights and Lock.
 
 use super::app::App;
+use super::dial;
 use super::ui::{bar_spans, draw_session, group_state, habit_progress, local_time, pane_block, session_height};
 use crate::stats_view::{self, streak_label};
 use habit_core::config::{RewardMode, Strictness};
@@ -407,10 +408,21 @@ fn heatmap(frame: &mut Frame, area: Rect, app: &App, h: &HabitView) {
 
 // ---- Insights ---------------------------------------------------------------
 
+/// Below this height the Insights pane leaves out the week and the sundial,
+/// so the table keeps some rows.
+const WEEK_MIN_HEIGHT: u16 = 34;
+/// Height of each chart row in Insights.
+const CHART_HEIGHT: u16 = 11;
+/// Width of the sundial's block: the dial and its numbers.
+const DIAL_WIDTH: u16 = 44;
+
 pub fn insights(frame: &mut Frame, area: Rect, app: &App, snapshot: &Snapshot) {
-    // The hourly chart needs the full width, so it sits below the table (and
-    // the week's numbers, which only get their own column on wide terminals).
-    let [top, bars_area] = Layout::vertical([Constraint::Min(6), Constraint::Length(11)]).areas(area);
+    // The charts need the full width, so they sit below the table (and the
+    // week's numbers, which only get their own column on wide terminals).
+    let week_height = if area.height >= WEEK_MIN_HEIGHT { CHART_HEIGHT } else { 0 };
+    let [top, week_area, bars_area] =
+        Layout::vertical([Constraint::Min(6), Constraint::Length(week_height), Constraint::Length(CHART_HEIGHT)])
+            .areas(area);
     let (table_area, week) = if area.width >= WIDE {
         let [table, week] = Layout::horizontal([Constraint::Percentage(64), Constraint::Percentage(36)]).areas(top);
         (table, week)
@@ -494,7 +506,33 @@ pub fn insights(frame: &mut Frame, area: Rect, app: &App, snapshot: &Snapshot) {
         frame.render_widget(Paragraph::new(dim(format!(" Nothing matches {:?}", app.insights_filter))), inner);
     }
     let chosen = app.app_index.checked_sub(1).and_then(|i| rows.get(i));
-    hourly_bars(frame, bars_area, app, snapshot, chosen);
+
+    // One color per category or habit across all charts: the week's
+    // categories first, then whatever the hours add.
+    let stacks = stats_view::week_stacks(&rows);
+    let mut palette = Palette::default();
+    palette.add(group_totals(stacks.iter().flatten().map(|(label, ms)| (label.as_str(), *ms, false))));
+    for breakdown in [&app.breakdown_period, &app.breakdown_day] {
+        palette.add(group_totals(breakdown.slices.iter().map(|s| (s.label.as_str(), s.ms, s.habit))));
+    }
+
+    if week_height > 0 {
+        let (week_chart_area, dial_area) = if week_area.width >= WIDE {
+            let [chart, dial] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(DIAL_WIDTH)]).areas(week_area);
+            (chart, Some(dial))
+        } else {
+            (week_area, None)
+        };
+        let labels = day_labels(app, stacks.len().max(chosen.map_or(0, |r| r.days_sessions.len())));
+        match chosen {
+            Some(row) => opens_chart(frame, week_chart_area, row, &labels),
+            None => week_bars(frame, week_chart_area, &stacks, &labels, &palette),
+        }
+        if let Some(dial_area) = dial_area {
+            sundial(frame, dial_area, app, snapshot, chosen, &palette);
+        }
+    }
+    hourly_bars(frame, bars_area, app, snapshot, chosen, &palette);
 
     let now = snapshot.now_ms;
     let days: Vec<_> = app.stats.iter().rev().take(7).collect();
@@ -527,7 +565,7 @@ pub fn insights(frame: &mut Frame, area: Rect, app: &App, snapshot: &Snapshot) {
     frame.render_widget(Paragraph::new(lines).block(pane_block("This week")), week);
 }
 
-/// Colors for the labels of the hourly chart, in order of their size.
+/// Colors for the labels of the charts, in order of their size.
 const SLICE_COLORS: [Color; 8] = [
     Color::Cyan,
     Color::Green,
@@ -539,41 +577,294 @@ const SLICE_COLORS: [Color; 8] = [
     Color::LightMagenta,
 ];
 
-/// Screen time per hour, stacked by habit, category or app, like a screen
-/// time report. Time during a habit counts as that habit.
-fn hourly_bars(frame: &mut Frame, area: Rect, app: &App, snapshot: &Snapshot, chosen: Option<&stats_view::UsageRow>) {
-    let (breakdown, period) = if app.chart_period {
-        (&app.breakdown_period, "Last 7 days".to_string())
-    } else {
-        (&app.breakdown_day, day_label(&app.breakdown_day))
-    };
-    // A chosen row shows its own hours; the total row stacks everything.
-    let slices: Vec<&habit_core::snapshot::HourSlice> = match chosen {
+/// The colors of `SLICE_COLORS` as pictures need them. The terminal's theme
+/// decides the real ones, so these are the usual defaults.
+fn rgb_of(color: Color) -> dial::Rgb {
+    match color {
+        Color::Cyan => [86, 182, 194],
+        Color::Green => [152, 195, 121],
+        Color::Magenta => [198, 120, 221],
+        Color::Yellow => [229, 192, 123],
+        Color::Blue => [97, 175, 239],
+        Color::Red => [224, 108, 117],
+        Color::LightCyan => [140, 220, 230],
+        Color::LightMagenta => [230, 160, 240],
+        Color::Rgb(r, g, b) => [r, g, b],
+        _ => [160, 160, 160],
+    }
+}
+
+/// Labels (habits, categories, apps) in the order they got their color, so
+/// a label keeps its color across the charts of a pane.
+#[derive(Default)]
+struct Palette(Vec<String>);
+
+impl Palette {
+    /// Gives the new labels of `totals` (biggest first) the next colors.
+    fn add(&mut self, totals: Vec<(String, u64, bool)>) {
+        for (label, _, _) in totals {
+            if !self.0.contains(&label) {
+                self.0.push(label);
+            }
+        }
+    }
+
+    fn color(&self, label: &str) -> Color {
+        let rank = self.0.iter().position(|l| l == label).unwrap_or(self.0.len());
+        SLICE_COLORS[rank % SLICE_COLORS.len()]
+    }
+}
+
+/// `(label, ms, habit)` summed by label, biggest first.
+fn group_totals<'a>(parts: impl IntoIterator<Item = (&'a str, u64, bool)>) -> Vec<(String, u64, bool)> {
+    let mut totals: Vec<(String, u64, bool)> = Vec::new();
+    for (label, ms, habit) in parts {
+        match totals.iter_mut().find(|(l, _, _)| l == label) {
+            Some(entry) => entry.1 += ms,
+            None => totals.push((label.to_string(), ms, habit)),
+        }
+    }
+    totals.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    totals
+}
+
+/// A legend line: the biggest `limit` labels with their color and time.
+fn legend(totals: &[(String, u64, bool)], palette: &Palette, limit: usize) -> Line<'static> {
+    let mut legend = vec![Span::from(" ")];
+    for (label, ms, habit) in totals.iter().take(limit) {
+        legend.push("█ ".fg(palette.color(label)));
+        legend.push(format!("{}{label} ", if *habit { "✓" } else { "" }).into());
+        legend.push(dim(format!("{}  ", format_duration(*ms))));
+    }
+    if totals.is_empty() {
+        legend.push(dim("nothing recorded"));
+    } else if totals.len() > limit {
+        legend.push(dim(format!("+{} more", totals.len() - limit)));
+    }
+    Line::from(legend)
+}
+
+/// The hour slices that belong to `chosen`: all of them for the total row,
+/// an app's own, or every app of a category.
+fn chosen_slices<'a>(
+    breakdown: &'a Breakdown,
+    snapshot: &Snapshot,
+    chosen: Option<&stats_view::UsageRow>,
+) -> Vec<&'a habit_core::snapshot::HourSlice> {
+    match chosen {
         None => breakdown.slices.iter().collect(),
         Some(row) => breakdown
             .slices
             .iter()
             .filter(|s| match &row.key {
                 Some(key) => &s.key == key,
-                // A category row: every app in it.
                 None => snapshot.app_categories.get(&s.key).map(String::as_str) == Some(row.label.as_str()),
             })
             .collect(),
-    };
+    }
+}
 
-    // Labels by total, biggest first: that decides their color.
-    let mut totals: Vec<(&str, u64, bool)> = Vec::new();
-    for slice in &slices {
-        match totals.iter_mut().find(|(label, _, _)| *label == slice.label) {
-            Some(entry) => entry.1 += slice.ms,
-            None => totals.push((&slice.label, slice.ms, slice.habit)),
+/// Labels for the last `count` days, oldest first: weekdays, then "today".
+fn day_labels(app: &App, count: usize) -> Vec<String> {
+    const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    let days = &app.stats[app.stats.len().saturating_sub(count)..];
+    let mut labels: Vec<String> = days.iter().map(|d| WEEKDAYS[stats_view::weekday(d.day)].to_string()).collect();
+    if let Some(last) = labels.last_mut() {
+        *last = "today".into();
+    }
+    // Missing stats (still loading): leave those days unnamed.
+    let mut out = vec![String::new(); count.saturating_sub(labels.len())];
+    out.extend(labels);
+    out
+}
+
+/// Screen time per day of the week, stacked by category.
+fn week_bars(frame: &mut Frame, area: Rect, stacks: &[Vec<(String, u64)>], labels: &[String], palette: &Palette) {
+    let days: Vec<u64> = stacks.iter().map(|parts| parts.iter().map(|(_, ms)| ms).sum()).collect();
+    let total: u64 = days.iter().sum();
+    let mut header = vec![" Screen time ".fg(Color::DarkGray), format_duration(total).bold().fg(Color::Cyan)];
+    if !days.is_empty() {
+        header.push(dim(format!("  ·  {}/day", format_duration(total / days.len() as u64))));
+    }
+    if let Some((busiest, _)) = days.iter().enumerate().filter(|(_, ms)| **ms > 0).max_by_key(|(_, ms)| **ms) {
+        header.push(dim(format!("  ·  most on {}", labels.get(busiest).map_or("", String::as_str))));
+    }
+    let columns = stacks
+        .iter()
+        .zip(&days)
+        .map(|(parts, total)| (*total, parts.iter().map(|(label, ms)| (palette.color(label), *ms)).collect()))
+        .collect();
+    let totals = group_totals(stacks.iter().flatten().map(|(label, ms)| (label.as_str(), *ms, false)));
+    let footer = legend(&totals, palette, 4);
+    draw_bars(frame, area, "This week · by category", Line::from(header), columns, &Columns::Days(labels), footer);
+}
+
+/// How often the chosen app or category was opened each day.
+fn opens_chart(frame: &mut Frame, area: Rect, row: &stats_view::UsageRow, labels: &[String]) {
+    use ratatui::symbols::Marker;
+    use ratatui::widgets::{Axis, Chart, Dataset, GraphType};
+    let block = pane_block(&format!("{} · opens per day", row.label));
+    let opens = &row.days_sessions;
+    if opens.iter().all(|&n| n == 0) {
+        let text = dim(" No opens recorded this week (they come from habitd's archive).");
+        frame.render_widget(Paragraph::new(text).block(block), area);
+        return;
+    }
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let [header_area, chart_area] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(inner);
+    let total: u32 = opens.iter().sum();
+    let mut header = vec![" Opened ".fg(Color::DarkGray), format!("{total}×").bold().fg(Color::Cyan)];
+    header.push(dim(format!("  ·  {:.1}/day", f64::from(total) / opens.len() as f64)));
+    if row.days_ms.iter().any(|&ms| ms > 0) {
+        header.push(dim(format!("  ·  {} used", format_duration(row.days_ms.iter().sum()))));
+    }
+    if row.avg_session_ms > 0 {
+        header.push(dim(format!("  ·  {}/visit", format_duration(row.avg_session_ms))));
+    }
+    frame.render_widget(Paragraph::new(Line::from(header)), header_area);
+
+    let max = opens.iter().copied().max().unwrap_or(0).max(1);
+    let points: Vec<(f64, f64)> = opens.iter().enumerate().map(|(day, &n)| (day as f64, f64::from(n))).collect();
+    let line = Dataset::default()
+        .marker(Marker::Braille)
+        .graph_type(GraphType::Line)
+        .style(Style::new().fg(Color::Cyan))
+        .data(&points);
+    let dots = Dataset::default().marker(Marker::Dot).style(Style::new().fg(Color::Cyan).bold()).data(&points);
+    let x_labels: Vec<Line> = labels.iter().map(|l| Line::from(dim(l.clone()))).collect();
+    let chart = Chart::new(vec![line, dots])
+        .x_axis(Axis::default().bounds([0.0, (opens.len().max(2) - 1) as f64]).labels(x_labels))
+        .y_axis(
+            Axis::default()
+                .bounds([0.0, f64::from(max)])
+                .labels([Line::from(dim("0")), Line::from(dim(max.to_string()))]),
+        );
+    frame.render_widget(chart, chart_area);
+}
+
+/// The hours of the last week as a dial, for the chosen app or category or
+/// for everything.
+fn sundial(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    snapshot: &Snapshot,
+    chosen: Option<&stats_view::UsageRow>,
+    palette: &Palette,
+) {
+    let title = match chosen {
+        Some(row) => format!("Rhythm · {}", row.label),
+        None => "Rhythm · last 7 days".into(),
+    };
+    let block = pane_block(&title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let slices = chosen_slices(&app.breakdown_period, snapshot, chosen);
+    let hours: Vec<Vec<(String, u64)>> = (0..24u8)
+        .map(|hour| {
+            group_totals(slices.iter().filter(|s| s.hour == hour).map(|s| (s.label.as_str(), s.ms, s.habit)))
+                .into_iter()
+                .map(|(label, ms, _)| (label, ms))
+                .collect()
+        })
+        .collect();
+    let totals = group_totals(slices.iter().map(|s| (s.label.as_str(), s.ms, s.habit)));
+    let total: u64 = totals.iter().map(|(_, ms, _)| ms).sum();
+
+    // The dial is round in pixels, so its width in cells follows the font.
+    let font = app.picker.as_ref().map_or((10, 20), |p| (p.font_size().width.max(1), p.font_size().height.max(1)));
+    let rows = inner.height;
+    let cols = ((u32::from(rows) * u32::from(font.1)).div_ceil(u32::from(font.0)) as u16).min(inner.width.saturating_sub(4));
+    // On the right, so midnight's mark on the top border misses the title.
+    let dial_area = Rect { x: inner.right().saturating_sub(cols + 2), y: inner.y, width: cols, height: rows };
+    let middle = inner.y + rows / 2;
+    // Hour marks around the dial; midnight and noon sit on the border.
+    let mark = |frame: &mut Frame, x: u16, y: u16, text: &str| {
+        if x >= area.x && x + width(text) as u16 <= area.right() {
+            frame.render_widget(Paragraph::new(dim(text.to_string())), Rect { x, y, width: width(text) as u16, height: 1 });
+        }
+    };
+    let centre = dial_area.x + cols / 2;
+    mark(frame, centre.saturating_sub(1), area.y, "0h");
+    mark(frame, centre.saturating_sub(1), area.bottom().saturating_sub(1), "12");
+    mark(frame, dial_area.x.saturating_sub(2), middle, "18");
+    mark(frame, dial_area.right(), middle, "6");
+
+    let covered = app.popup.is_some() || app.editor.is_some();
+    if let (Some(picker), false) = (&app.picker, covered) {
+        let parts: Vec<dial::Hour> =
+            hours.iter().map(|h| h.iter().map(|(label, ms)| (rgb_of(palette.color(label)), *ms)).collect()).collect();
+        let now = chrono::DateTime::from_timestamp_millis(snapshot.now_ms as i64)
+            .map(|t| t.with_timezone(&chrono::Local))
+            .map(|t| {
+                use chrono::Timelike;
+                t.hour() as f32 + t.minute() as f32 / 60.0
+            });
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (&parts, now.map(|n| (n * 12.0) as u32), cols, rows).hash(&mut hasher);
+            hasher.finish()
+        };
+        let mut cache = app.dial.borrow_mut();
+        if cache.as_ref().is_none_or(|(k, _)| *k != key) {
+            let picture = dial::render(&parts, now, u32::from(cols) * u32::from(font.0), u32::from(rows) * u32::from(font.1));
+            let size = ratatui::layout::Size::new(cols, rows);
+            *cache = picker
+                .new_protocol(image::DynamicImage::ImageRgba8(picture), size, ratatui_image::Resize::Fit(None))
+                .ok()
+                .map(|protocol| (key, protocol));
+        }
+        if let Some((_, protocol)) = cache.as_ref() {
+            frame.render_widget(ratatui_image::Image::new(protocol), dial_area);
         }
     }
-    totals.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-    let color_of = |label: &str| {
-        let rank = totals.iter().position(|(l, _, _)| *l == label).unwrap_or(0);
-        SLICE_COLORS[rank % SLICE_COLORS.len()]
+
+    // The numbers beside it.
+    let text_area = Rect { width: dial_area.x.saturating_sub(inner.x + 3), ..inner };
+    let hour_totals: Vec<u64> = hours.iter().map(|h| h.iter().map(|(_, ms)| ms).sum()).collect();
+    let mut lines = vec![
+        Line::from(vec![" ".into(), format_duration(total).bold().fg(Color::Cyan), dim(" in 7 days")]),
+    ];
+    if let Some(peak) = stats_view::peak_hour(&hour_totals) {
+        lines.push(Line::from(vec![dim(" busiest "), peak.into()]));
+    }
+    let night: u64 = hour_totals.iter().enumerate().filter(|(h, _)| *h < 6).map(|(_, ms)| ms).sum();
+    if night > 0 {
+        lines.push(Line::from(vec![dim(" 0–6h    "), format_duration(night).into()]));
+    }
+    lines.push(Line::from(""));
+    for (label, ms, habit) in totals.iter().take(usize::from(text_area.height).saturating_sub(lines.len())) {
+        let share = (*ms * 100).checked_div(total).unwrap_or(0);
+        let name = pad(&format!("{}{label}", if *habit { "✓" } else { "" }), usize::from(text_area.width).saturating_sub(8));
+        lines.push(Line::from(vec![" █ ".fg(palette.color(label)), name.into(), dim(format!("{share:>4}%"))]));
+    }
+    if totals.is_empty() {
+        lines.push(Line::from(dim(" nothing recorded")));
+    }
+    frame.render_widget(Paragraph::new(lines), text_area);
+}
+
+/// Screen time per hour, stacked by habit, category or app, like a screen
+/// time report. Time during a habit counts as that habit.
+fn hourly_bars(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    snapshot: &Snapshot,
+    chosen: Option<&stats_view::UsageRow>,
+    palette: &Palette,
+) {
+    let (breakdown, period) = if app.chart_period {
+        (&app.breakdown_period, "Last 7 days".to_string())
+    } else {
+        (&app.breakdown_day, day_label(&app.breakdown_day))
     };
+    // A chosen row shows its own hours; the total row stacks everything.
+    let slices = chosen_slices(breakdown, snapshot, chosen);
+    let totals = group_totals(slices.iter().map(|s| (s.label.as_str(), s.ms, s.habit)));
     let total: u64 = totals.iter().map(|(_, ms, _)| ms).sum();
 
     let mut header = vec![" Screen time ".fg(Color::DarkGray), format_duration(total).bold().fg(Color::Cyan)];
@@ -589,28 +880,17 @@ fn hourly_bars(frame: &mut Frame, area: Rect, app: &App, snapshot: &Snapshot, ch
     let stacks: Vec<(u64, Vec<(Color, u64)>)> = (0..24u8)
         .map(|hour| {
             let mut parts: Vec<(Color, u64)> =
-                slices.iter().filter(|s| s.hour == hour).map(|s| (color_of(&s.label), s.ms)).collect();
+                slices.iter().filter(|s| s.hour == hour).map(|s| (palette.color(&s.label), s.ms)).collect();
             parts.sort_by_key(|(_, ms)| std::cmp::Reverse(*ms));
             (hours[hour as usize], parts)
         })
         .collect();
 
-    let mut legend = vec![Span::from(" ")];
-    for (label, ms, habit) in totals.iter().take(6) {
-        legend.push("█ ".fg(color_of(label)));
-        legend.push(format!("{}{label} ", if *habit { "✓" } else { "" }).into());
-        legend.push(dim(format!("{}  ", format_duration(*ms))));
-    }
-    if totals.is_empty() {
-        legend.push(dim("nothing recorded"));
-    } else if totals.len() > 6 {
-        legend.push(dim(format!("+{} more", totals.len() - 6)));
-    }
     let title = match chosen {
         Some(row) => format!("{period} · {}", row.label),
         None => period,
     };
-    draw_bars(frame, area, &title, Line::from(header), stacks, Line::from(legend));
+    draw_bars(frame, area, &title, Line::from(header), stacks, &Columns::Hours, legend(&totals, palette, 6));
 }
 
 /// "Today", "Yesterday" or "Mon 21 Sep" for the day a breakdown covers.
@@ -624,22 +904,35 @@ fn day_label(breakdown: &Breakdown) -> String {
     }
 }
 
-/// One column per hour: `stacks` gives each hour's total and its parts from
-/// the bottom up, with `header` above and `footer` (legend or numbers) below.
+/// What the columns of `draw_bars` stand for.
+enum Columns<'a> {
+    /// The 24 hours of a day, narrow and labelled every third hour.
+    Hours,
+    /// Days, wide and labelled one by one.
+    Days(&'a [String]),
+}
+
+/// One column per hour or day: `stacks` gives each column's total and its
+/// parts from the bottom up, with `header` above and `footer` (legend or
+/// numbers) below.
 fn draw_bars(
     frame: &mut Frame,
     area: Rect,
     title: &str,
     header: Line<'static>,
     stacks: Vec<(u64, Vec<(Color, u64)>)>,
+    columns: &Columns,
     footer: Line<'static>,
 ) {
     let mut lines = vec![header];
     let inner_width = area.width.saturating_sub(2) as usize;
-    let cell = if inner_width > 24 * 2 { 2 } else { 1 };
+    let (cell, gap) = match columns {
+        Columns::Hours => (if inner_width > 24 * 2 { 2 } else { 1 }, 0),
+        Columns::Days(_) => ((inner_width.saturating_sub(1) / stacks.len().max(1)).clamp(2, 9) - 1, 1),
+    };
     let height = (area.height as usize).saturating_sub(5).max(1);
     let max = stacks.iter().map(|(total, _)| *total).max().unwrap_or(0).max(1);
-    let columns: Vec<Vec<Color>> = stacks
+    let bars: Vec<Vec<Color>> = stacks
         .iter()
         .map(|(total, parts)| {
             let cells = ((total * height as u64).div_ceil(max) as usize).min(height);
@@ -655,19 +948,31 @@ fn draw_bars(
         .collect();
     for row in 0..height {
         let from_bottom = height - 1 - row;
-        let spans: Vec<Span> = columns
-            .iter()
-            .map(|column| match column.get(from_bottom) {
+        let mut spans = vec![Span::from(" ")];
+        for column in &bars {
+            spans.push(match column.get(from_bottom) {
                 Some(color) => "█".repeat(cell).fg(*color),
                 None => " ".repeat(cell).into(),
-            })
-            .collect();
-        lines.push(Line::from(std::iter::once(Span::from(" ")).chain(spans).collect::<Vec<_>>()));
+            });
+            if gap > 0 {
+                spans.push(" ".repeat(gap).into());
+            }
+        }
+        lines.push(Line::from(spans));
     }
-    // Hour labels under the columns, every third hour.
     let mut axis = String::from(" ");
-    for hour in (0..24).step_by(3) {
-        axis += &format!("{hour:<width$}", width = 3 * cell);
+    match columns {
+        // Hour labels under the columns, every third hour.
+        Columns::Hours => {
+            for hour in (0..24).step_by(3) {
+                axis += &format!("{hour:<width$}", width = 3 * cell);
+            }
+        }
+        Columns::Days(labels) => {
+            for label in labels.iter() {
+                axis += &pad(label, cell + gap);
+            }
+        }
     }
     lines.push(Line::from(dim(axis)));
     lines.push(footer);

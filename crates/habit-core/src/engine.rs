@@ -1139,24 +1139,27 @@ impl Engine {
     pub fn app_usage(&self, days: u32, now: u64) -> Vec<AppUsageView> {
         let today = self.day_of(now);
         let first = today - i64::from(days.max(1)) + 1;
-        let mut totals: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
+        let period = (today - first + 1) as usize;
+        let mut totals: BTreeMap<&str, (u64, u64, Vec<u64>)> = BTreeMap::new();
         for (&day, apps) in self.state.app_days.range(first..=today) {
             for (app, &ms) in apps {
-                let entry = totals.entry(app).or_default();
+                let entry = totals.entry(app).or_insert_with(|| (0, 0, vec![0; period]));
                 entry.1 += ms;
+                entry.2[(day - first) as usize] += ms;
                 if day == today {
                     entry.0 += ms;
                 }
             }
         }
         for (app, &ms) in &self.app_pending {
-            let entry = totals.entry(app).or_default();
+            let entry = totals.entry(app).or_insert_with(|| (0, 0, vec![0; period]));
             entry.0 += ms;
             entry.1 += ms;
+            entry.2[period - 1] += ms;
         }
         let mut usage: Vec<AppUsageView> = totals
             .into_iter()
-            .map(|(app, (today_ms, total_ms))| AppUsageView {
+            .map(|(app, (today_ms, total_ms, days_ms))| AppUsageView {
                 app: app.to_string(),
                 today_ms,
                 total_ms,
@@ -1166,6 +1169,8 @@ impl Engine {
                 longest_session_ms: 0,
                 hours: Vec::new(),
                 hours_today: Vec::new(),
+                days_ms,
+                days_sessions: Vec::new(),
             })
             .collect();
         usage.sort_by(|a, b| b.total_ms.cmp(&a.total_ms).then_with(|| a.app.cmp(&b.app)));
@@ -1254,9 +1259,12 @@ impl Engine {
             last_end: Option<u64>,
             hours: [u64; 24],
             hours_today: [u64; 24],
+            days_sessions: Vec<u32>,
         }
         let from = self.usage_period_start(days, now);
         let today = self.day_of(now);
+        let first = today - i64::from(days.max(1)) + 1;
+        let period = (today - first + 1) as usize;
         let mut keys: BTreeMap<&str, Acc> = BTreeMap::new();
         for visit in visits.iter().chain(self.visit.as_ref()).filter(|v| v.end > from && v.start < now) {
             let acc = keys.entry(&visit.key).or_default();
@@ -1266,9 +1274,13 @@ impl Engine {
                 acc.longest_ms = acc.longest_ms.max(acc.session_ms);
                 acc.session_ms = visit.active_ms;
                 acc.sessions += 1;
-                if self.day_of(visit.start) == today {
+                let day = self.day_of(visit.start);
+                if day == today {
                     acc.sessions_today += 1;
                 }
+                acc.days_sessions.resize(period, 0);
+                // A session from before the period counts on its first day.
+                acc.days_sessions[((day.max(first) - first) as usize).min(period - 1)] += 1;
             }
             acc.active_ms += visit.active_ms;
             acc.last_end = Some(visit.end);
@@ -1296,6 +1308,7 @@ impl Engine {
             view.longest_session_ms = acc.longest_ms.max(acc.session_ms);
             view.hours = acc.hours.to_vec();
             view.hours_today = acc.hours_today.to_vec();
+            view.days_sessions = acc.days_sessions.clone();
         }
         usage
     }
@@ -3590,6 +3603,9 @@ mod tests {
         // Today alone leaves out yesterday's five minutes.
         assert_eq!(x.hours_today[10], 40 * MIN);
         assert_eq!(x.hours_today.iter().sum::<u64>(), 60 * MIN);
+        // Per day, oldest first.
+        assert_eq!(x.days_ms, [30 * MIN, 30 * MIN]);
+        assert_eq!(x.days_sessions, [1, 2]);
 
         // One day only covers today.
         let x = e.app_insights(1, &visits, now).into_iter().find(|u| u.app == key).unwrap();

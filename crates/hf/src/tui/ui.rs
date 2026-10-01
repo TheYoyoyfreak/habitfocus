@@ -564,6 +564,47 @@ mod tests {
     }
 
     #[test]
+    fn insights_pane_shows_the_week_opens_and_sundial() {
+        let mut e = engine();
+        e.handle(Input::WindowsReset(vec![habit_core::WindowInfo { id: 1, app_id: "zed".into(), title: String::new(), pid: None }]), 0);
+        e.handle(Input::FocusChanged(Some(1)), 0);
+        for t in 1..=90 {
+            e.handle(Input::Tick, t * 1000);
+        }
+        let mut app = app_for(&e, 150_000);
+        let visit = |key: &str, start, end| habit_core::archive::Visit {
+            key: key.into(),
+            start,
+            end,
+            active_ms: end - start,
+            habit: None,
+        };
+        let visits = [visit("zed", 0, 30_000), visit("zed", 100_000, 150_000)];
+        app.apps = e.app_insights(7, &visits, 150_000);
+        app.breakdown_day = e.day_breakdown(&visits, 0, 150_000, false);
+        app.breakdown_period = e.period_breakdown(&visits, 7, 150_000);
+        app.handle_key(key(KeyCode::Char('4')));
+
+        // Too short a terminal keeps the old layout.
+        assert!(!render(&app, 120, 30).contains("This week · by category"));
+        let screen = render(&app, 120, 44);
+        assert_shows(&screen, &["This week · by category", "today", "Rhythm · last 7 days", "0h", "12", "18", "in 7 days"]);
+
+        // Choosing a row turns the week into its opens.
+        app.handle_key(key(KeyCode::Down));
+        let screen = render(&app, 120, 44);
+        assert_shows(&screen, &["zed · opens per day", "Opened 2×", "Rhythm · zed"]);
+
+        // With pictures (halfblocks here), the dial is drawn and kept.
+        app.picker = Some(ratatui_image::picker::Picker::halfblocks());
+        render(&app, 120, 44);
+        let key_before = app.dial.borrow().as_ref().map(|(k, _)| *k);
+        assert!(key_before.is_some(), "the dial was drawn");
+        render(&app, 120, 44);
+        assert_eq!(app.dial.borrow().as_ref().map(|(k, _)| *k), key_before, "and reused while nothing changed");
+    }
+
+    #[test]
     fn insights_pane_shows_screen_time_and_week() {
         let mut e = engine();
         e.handle(Input::WindowsReset(vec![habit_core::WindowInfo { id: 1, app_id: "zed".into(), title: String::new(), pid: None }]), 0);
