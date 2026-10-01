@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/habit-core", "crates/habit-ipc", "crates/habitd", "crates/hf"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 
