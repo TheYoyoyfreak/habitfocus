@@ -65,8 +65,14 @@ function render(snapshot, connected) {
   const blocked = (snapshot.blocked_domains ?? []).some(matches);
   if (!blocked && originalUrl) {
     leaving = true;
-    $("headline").textContent = "Unlocked";
-    $("lead").textContent = "Taking you back…";
+    // The site can take a while to load; dots blinking in turn show the page
+    // hasn't frozen.
+    const dots = document.createElement("span");
+    dots.className = "dots";
+    dots.setAttribute("aria-hidden", "true");
+    dots.append(...[0, 1, 2].map(() => Object.assign(document.createElement("span"), { textContent: "." })));
+    $("headline").replaceChildren("Unlocking", dots);
+    $("lead").textContent = host ? `Taking you back to ${host}.` : "Taking you back.";
     location.replace(originalUrl);
     return;
   }
