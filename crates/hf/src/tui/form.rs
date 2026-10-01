@@ -236,7 +236,16 @@ fn draw_picker(frame: &mut Frame, area: Rect, editor: &Editor) {
             format!(" enter adds {:?}", picker.filter)
         })));
     }
-    for (i, (value, per_day)) in options.iter().take(10).enumerate() {
+    // At most ten rows, fewer when the screen is short (the frame, the lines
+    // above and the "more" and hint lines below take the rest), scrolled so
+    // the chosen one stays in view.
+    let room = (area.height as usize).saturating_sub(lines.len() + 6).max(1);
+    let shown = options.len().min(10).min(room);
+    let first = (picker.index + 1).saturating_sub(shown).min(options.len().saturating_sub(shown));
+    if first > 0 {
+        lines.push(Line::from(dim(format!(" ↑ {first} more"))));
+    }
+    for (i, (value, per_day)) in options.iter().enumerate().skip(first).take(shown) {
         let label = match rule_from_text(value) {
             Ok(rule) if rules => describe_rule(editor, &serde_json::Value::Object(rule)),
             _ => editor.app_with_name(value),
@@ -249,7 +258,8 @@ fn draw_picker(frame: &mut Frame, area: Rect, editor: &Editor) {
         let line = Line::from(vec![format!(" {label:<40}").into(), dim(use_)]);
         lines.push(if i == picker.index { line.add_modifier(Modifier::REVERSED) } else { line });
     }
-    lines.push(Line::from(""));
+    let below = options.len().saturating_sub(first + shown);
+    lines.push(if below > 0 { Line::from(dim(format!(" ↓ {below} more"))) } else { Line::from("") });
     lines.push(Line::from(dim(" ↑/↓ choose · enter add · esc cancel")));
     let height = (lines.len() as u16 + 2).min(area.height);
     let [popup] = Layout::horizontal([Constraint::Length(64.min(area.width))]).flex(Flex::Center).areas(area);

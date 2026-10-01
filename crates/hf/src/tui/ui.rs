@@ -798,6 +798,24 @@ mod tests {
         app.handle_key(key(KeyCode::Char('a')));
         assert_shows(&render(&app, 130, 40), &["Add app", "Find or type"]);
 
+        // A long list scrolls with the choice instead of losing it below.
+        let editor = app.editor.as_mut().unwrap();
+        editor.context.recent = (0..15).map(|i| (format!("app{i:02}"), 60_000)).collect();
+        let screen = render(&app, 130, 40);
+        assert_shows(&screen, &["app09", "↓ 5 more"]);
+        assert!(!screen.contains("app10") && !screen.contains("↑ "), "{screen}");
+        for _ in 0..12 {
+            app.handle_key(key(KeyCode::Down));
+        }
+        let screen = render(&app, 130, 40);
+        assert_shows(&screen, &["↑ 3 more", "app12", "↓ 2 more"]);
+        assert!(!screen.contains("app02"), "{screen}");
+        let chosen = app.editor.as_ref().unwrap().picker.as_ref().unwrap().index;
+        assert_eq!(chosen, 12);
+        // A short screen shows fewer rows, still with the choice.
+        assert_shows(&render(&app, 130, 16), &["app12", "↑ ", "↓ "]);
+        app.handle_key(key(KeyCode::Esc));
+
         app.editor = None;
         app.open_editor(super::super::editor::Section::Habits, Some("yoga".into()), &entries);
         let screen = render(&app, 130, 40);
