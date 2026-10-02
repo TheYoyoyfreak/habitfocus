@@ -732,15 +732,43 @@ fn opens_chart(frame: &mut Frame, area: Rect, row: &stats_view::UsageRow, labels
         .style(Style::new().fg(Color::Cyan))
         .data(&points);
     let dots = Dataset::default().marker(Marker::Dot).style(Style::new().fg(Color::Cyan).bold()).data(&points);
-    let x_labels: Vec<Line> = labels.iter().map(|l| Line::from(dim(l.clone()))).collect();
+    let y_labels = [Line::from(dim("0")), Line::from(dim(max.to_string()))];
+    let y_label_width = y_labels.iter().map(Line::width).max().unwrap_or(0) as u16;
+    // ratatui spreads x labels over even slots, not under the points, so its
+    // labels stay empty (keeping the axis and the row) and the days are
+    // drawn under their dots below.
     let chart = Chart::new(vec![line, dots])
-        .x_axis(Axis::default().bounds([0.0, (opens.len().max(2) - 1) as f64]).labels(x_labels))
-        .y_axis(
-            Axis::default()
-                .bounds([0.0, f64::from(max)])
-                .labels([Line::from(dim("0")), Line::from(dim(max.to_string()))]),
-        );
+        .x_axis(Axis::default().bounds([0.0, (opens.len().max(2) - 1) as f64]).labels(vec![Line::from(""); 2]))
+        .y_axis(Axis::default().bounds([0.0, f64::from(max)]).labels(y_labels));
     frame.render_widget(chart, chart_area);
+    if chart_area.height < 3 {
+        return;
+    }
+    // The graph starts after the y labels (at most a third of the width) and
+    // the y axis; points land on `round(i * (width - 1) / (n - 1))`.
+    let graph_x = chart_area.x + y_label_width.min(chart_area.width / 3) + 1;
+    let graph_width = chart_area.right().saturating_sub(graph_x);
+    let label_row = Rect { y: chart_area.bottom() - 1, height: 1, ..chart_area };
+    let mut free_from = label_row.x;
+    for (column, label) in point_columns(graph_x, graph_width, opens.len()).into_iter().zip(labels) {
+        let w = width(label) as u16;
+        let x = column.saturating_sub(w / 2).clamp(label_row.x, label_row.right().saturating_sub(w));
+        // Skip a label that would run into the one before.
+        if w == 0 || x < free_from {
+            continue;
+        }
+        frame.render_widget(Paragraph::new(dim(label.clone())), Rect { x, width: w, ..label_row });
+        free_from = x + w + 1;
+    }
+}
+
+/// The terminal column of each of `count` points spread over a chart's graph
+/// area, as ratatui's canvas places them.
+fn point_columns(graph_x: u16, graph_width: u16, count: usize) -> Vec<u16> {
+    let last = count.max(2) - 1;
+    (0..count)
+        .map(|i| graph_x + ((i * usize::from(graph_width.saturating_sub(1))) as f64 / last as f64).round() as u16)
+        .collect()
 }
 
 /// The hours of the last week as a dial, for the chosen app or category or
@@ -912,6 +940,19 @@ enum Columns<'a> {
     Days(&'a [String]),
 }
 
+/// A bar's total in at most `width` columns, as the header and legend write
+/// it (`2:56:43`), else shorter: `2h56m`, `2h`.
+fn bar_value(ms: u64, width: usize) -> Option<String> {
+    let (h, m) = (ms / 3_600_000, ms / 60_000 % 60);
+    let short = match (h, m) {
+        (0, 0) => format!("{}s", ms / 1000),
+        (0, m) => format!("{m}m"),
+        (h, 0) => format!("{h}h"),
+        (h, m) => format!("{h}h{m}m"),
+    };
+    [format_duration(ms), short, format!("{h}h")].into_iter().find(|text| text.chars().count() <= width)
+}
+
 /// One column per hour or day: `stacks` gives each column's total and its
 /// parts from the bottom up, with `header` above and `footer` (legend or
 /// numbers) below.
@@ -931,11 +972,14 @@ fn draw_bars(
         Columns::Days(_) => ((inner_width.saturating_sub(1) / stacks.len().max(1)).clamp(2, 9) - 1, 1),
     };
     let height = (area.height as usize).saturating_sub(5).max(1);
+    // Days carry their total above the bar, so the tallest leaves it a row.
+    let labelled = matches!(columns, Columns::Days(_)) && height > 1;
+    let bar_height = if labelled { height - 1 } else { height };
     let max = stacks.iter().map(|(total, _)| *total).max().unwrap_or(0).max(1);
     let bars: Vec<Vec<Color>> = stacks
         .iter()
         .map(|(total, parts)| {
-            let cells = ((total * height as u64).div_ceil(max) as usize).min(height);
+            let cells = ((total * bar_height as u64).div_ceil(max) as usize).min(bar_height);
             let mut column = Vec::new();
             for (color, ms) in parts.iter().filter(|(_, ms)| *ms > 0) {
                 let want = ((ms * cells as u64).div_ceil((*total).max(1)) as usize).max(1);
@@ -949,9 +993,13 @@ fn draw_bars(
     for row in 0..height {
         let from_bottom = height - 1 - row;
         let mut spans = vec![Span::from(" ")];
-        for column in &bars {
+        for (column, (total, _)) in bars.iter().zip(&stacks) {
             spans.push(match column.get(from_bottom) {
                 Some(color) => "█".repeat(cell).fg(*color),
+                None if labelled && from_bottom == column.len() && *total > 0 => match bar_value(*total, cell) {
+                    Some(value) => dim(format!("{value:^cell$}")),
+                    None => " ".repeat(cell).into(),
+                },
                 None => " ".repeat(cell).into(),
             });
             if gap > 0 {
@@ -1033,4 +1081,20 @@ pub fn lock(frame: &mut Frame, area: Rect, snapshot: &Snapshot) {
     }
     let block = Block::bordered().title(" Commitment lock ".bold()).border_style(Color::Magenta);
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bar_values_shorten_to_fit() {
+        const MIN: u64 = 60_000;
+        assert_eq!(bar_value(2 * 60 * MIN + 56 * MIN + 43_000, 8).as_deref(), Some("2:56:43"));
+        assert_eq!(bar_value(2 * 60 * MIN + 56 * MIN, 5).as_deref(), Some("2h56m"));
+        assert_eq!(bar_value(2 * 60 * MIN + 56 * MIN, 3).as_deref(), Some("2h"));
+        assert_eq!(bar_value(90_000, 4).as_deref(), Some("1:30"));
+        assert_eq!(bar_value(45 * MIN, 3).as_deref(), Some("45m"));
+        assert_eq!(bar_value(12 * 60 * MIN, 2), None);
+    }
 }

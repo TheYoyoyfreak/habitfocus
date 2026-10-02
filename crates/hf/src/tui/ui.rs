@@ -445,6 +445,14 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    /// Row and column (in characters) of the first `text` on the screen.
+    fn find(lines: &[Vec<char>], text: &str) -> Option<(usize, usize)> {
+        let text: Vec<char> = text.chars().collect();
+        lines.iter().enumerate().find_map(|(row, line)| {
+            line.windows(text.len()).position(|w| w == text.as_slice()).map(|col| (row, col))
+        })
+    }
+
     fn assert_shows(screen: &str, expected: &[&str]) {
         for text in expected {
             assert!(screen.contains(text), "missing {text:?} in\n{screen}");
@@ -589,11 +597,31 @@ mod tests {
         assert!(!render(&app, 120, 30).contains("This week · by category"));
         let screen = render(&app, 120, 44);
         assert_shows(&screen, &["This week · by category", "today", "Rhythm · last 7 days", "0h", "12", "18", "in 7 days"]);
+        // Each day's bar carries its total on top.
+        let lines: Vec<Vec<char>> = screen.lines().map(|l| l.chars().collect()).collect();
+        let on_bar = (0..lines.len() - 1).any(|row| {
+            find(&lines[row..=row], "1:30").is_some_and(|(_, col)| (col..col + 4).all(|c| lines[row + 1].get(c) == Some(&'█')))
+        });
+        assert!(on_bar, "today's total sits on its bar:\n{screen}");
 
         // Choosing a row turns the week into its opens.
         app.handle_key(key(KeyCode::Down));
         let screen = render(&app, 120, 44);
         assert_shows(&screen, &["zed · opens per day", "Opened 2×", "Rhythm · zed"]);
+        // Every day's name sits under its dot.
+        let lines: Vec<Vec<char>> = screen.lines().map(|l| l.chars().collect()).collect();
+        let (label_row, today) = find(&lines, "today").unwrap();
+        let dot_in = |cols: std::ops::Range<usize>| cols.clone().any(|c| (0..label_row).any(|r| lines[r].get(c) == Some(&'•')));
+        // "today" ends at the chart's edge, over the last dot.
+        assert!(dot_in(today..today + 5), "no dot above today:\n{screen}");
+        let weekdays: Vec<usize> = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            .iter()
+            .filter_map(|day| find(&lines[label_row..=label_row], day).map(|(_, c)| c))
+            .collect();
+        assert_eq!(weekdays.len(), 6, "the other days are labelled:\n{screen}");
+        for col in weekdays {
+            assert!(dot_in(col + 1..col + 2), "no dot above column {}:\n{screen}", col + 1);
+        }
 
         // With pictures (halfblocks here), the dial is drawn and kept.
         app.picker = Some(ratatui_image::picker::Picker::halfblocks());
