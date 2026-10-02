@@ -47,6 +47,9 @@ pub enum Request {
     /// The hours of one logical day, `day_offset` days back (0 = today),
     /// by habit, category and app (`Response.breakdown`).
     HourStats { day_offset: u32 },
+    /// Every visit of one logical day, `day_offset` days back (0 = today),
+    /// labelled (`Response.timeline`), with its hours (`Response.breakdown`).
+    Timeline { day_offset: u32 },
     /// Terminal focus of a timer client (`hf tui`); `focused: None` disconnects.
     TimerFocus { source: String, focused: Option<bool> },
     /// Change a `[general]` setting in the config file and reload.
@@ -110,6 +113,8 @@ pub struct Response {
     /// Hourly breakdown by habit, category or app (with `app_stats`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breakdown: Option<habit_core::snapshot::Breakdown>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<habit_core::snapshot::Timeline>,
 }
 
 /// Blocks and habits of the config file by id, each table as written.

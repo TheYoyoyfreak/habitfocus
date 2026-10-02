@@ -4,7 +4,7 @@
 //!
 //! Only habitd opens the database. Clients ask through the socket.
 
-use habit_core::archive::{Record, Visit};
+use habit_core::archive::{Afk, AfkReason, Record, Visit};
 use habit_core::state::{Event, EventKind, Outcome, State};
 use rusqlite::{params, Connection};
 use serde::de::DeserializeOwned;
@@ -12,7 +12,7 @@ use serde::Serialize;
 use std::path::Path;
 
 /// Schema version, stored in `PRAGMA user_version`.
-const VERSION: i64 = 2;
+const VERSION: i64 = 3;
 
 const SCHEMA: &str = "
     CREATE TABLE events (
@@ -42,6 +42,17 @@ const SCHEMA: &str = "
         habit TEXT
     );
     CREATE INDEX visits_start ON visits (start_ms);
+";
+
+/// Time away from the computer (schema 3).
+const AFK_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS afk (
+        id INTEGER PRIMARY KEY,
+        start_ms INTEGER NOT NULL,
+        end_ms INTEGER NOT NULL,
+        reason TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS afk_start ON afk (start_ms);
 ";
 
 pub struct Archive {
@@ -84,14 +95,20 @@ impl Archive {
         if version > VERSION {
             anyhow::bail!("history.db is from a newer habitd (schema {version}, this one knows {VERSION})");
         }
-        if version == 1 {
-            // Visits learned which habit they counted towards.
-            self.conn.execute_batch("ALTER TABLE visits ADD COLUMN habit TEXT")?;
-            self.conn.pragma_update(None, "user_version", VERSION)?;
+        if version == 1 || version == 2 {
+            let tx = self.conn.transaction()?;
+            if version == 1 {
+                // Visits learned which habit they counted towards.
+                tx.execute_batch("ALTER TABLE visits ADD COLUMN habit TEXT")?;
+            }
+            tx.execute_batch(AFK_SCHEMA)?;
+            tx.pragma_update(None, "user_version", VERSION)?;
+            tx.commit()?;
         }
         if version == 0 {
             let tx = self.conn.transaction()?;
             tx.execute_batch(SCHEMA)?;
+            tx.execute_batch(AFK_SCHEMA)?;
             let imported: Vec<Record> = state
                 .events
                 .iter()
@@ -156,6 +173,25 @@ impl Archive {
 }
 
 impl Archive {
+    /// Time away overlapping `from`..`to`, oldest first. Reasons this habitd
+    /// doesn't know are skipped.
+    pub fn afk(&self, from: u64, to: u64) -> anyhow::Result<Vec<Afk>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT start_ms, end_ms, reason FROM afk WHERE end_ms > ?1 AND start_ms < ?2 ORDER BY start_ms, id",
+        )?;
+        let rows = stmt.query_map(params![from as i64, to as i64], |row| {
+            Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64, row.get::<_, String>(2)?))
+        })?;
+        let mut afk = Vec::new();
+        for row in rows {
+            let (start, end, reason) = row?;
+            if let Some(reason) = from_name::<AfkReason>(&reason) {
+                afk.push(Afk { start, end, reason });
+            }
+        }
+        Ok(afk)
+    }
+
     /// When the first visit was recorded, if any.
     pub fn first_visit(&self) -> anyhow::Result<Option<u64>> {
         let first: Option<i64> =
@@ -174,6 +210,7 @@ fn insert(conn: &Connection, records: &[Record]) -> rusqlite::Result<()> {
     let mut visit = conn.prepare_cached(
         "INSERT INTO visits (key, start_ms, end_ms, active_ms, habit) VALUES (?1, ?2, ?3, ?4, ?5)",
     )?;
+    let mut afk = conn.prepare_cached("INSERT INTO afk (start_ms, end_ms, reason) VALUES (?1, ?2, ?3)")?;
     for record in records {
         match record {
             Record::Event(e) => {
@@ -190,6 +227,9 @@ fn insert(conn: &Connection, records: &[Record]) -> rusqlite::Result<()> {
             }
             Record::Visit(v) => {
                 visit.execute(params![v.key, v.start as i64, v.end as i64, v.active_ms as i64, v.habit])?;
+            }
+            Record::Afk(a) => {
+                afk.execute(params![a.start as i64, a.end as i64, name(&a.reason)])?;
             }
         }
     }
@@ -253,6 +293,27 @@ mod tests {
         assert_eq!((visits[0].key.as_str(), visits[0].habit.clone()), ("kitty", None));
         old.write(&[Record::Visit(Visit { key: "zed".into(), start: 0, end: 5, active_ms: 5, habit: Some("read".into()) })]).unwrap();
         assert_eq!(old.visits(0, 1000).unwrap()[1].habit.as_deref(), Some("read"));
+    }
+
+    #[test]
+    fn afk_is_queried_by_overlap_and_added_to_old_databases() {
+        let mut archive = Archive::in_memory(&State::default());
+        let afk = |start, end, reason| Record::Afk(Afk { start, end, reason });
+        archive.write(&[afk(0, 100, AfkReason::Idle), afk(200, 300, AfkReason::Asleep)]).unwrap();
+        assert_eq!(archive.afk(50, 250).unwrap().len(), 2);
+        assert_eq!(archive.afk(100, 200).unwrap(), []);
+        assert_eq!(archive.afk(250, 400).unwrap()[0].reason, AfkReason::Asleep);
+
+        // Schema 2 gains the table.
+        let old = Archive::in_memory(&State::default());
+        old.conn.execute_batch("DROP TABLE afk").unwrap();
+        old.conn.pragma_update(None, "user_version", 2).unwrap();
+        let mut old = Archive { conn: old.conn };
+        old.migrate(&State::default()).unwrap();
+        old.write(&[afk(0, 10, AfkReason::Idle)]).unwrap();
+        assert_eq!(old.afk(0, 10).unwrap().len(), 1);
+        let version: i64 = old.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(version, VERSION);
     }
 
     #[test]

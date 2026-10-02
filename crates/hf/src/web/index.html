@@ -1,0 +1,884 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>habitfocus insights</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%2312b5c4'/%3E%3C/svg%3E">
+<style>
+/* Served by `hf web`. Looks like `hf tui`: monospace, bordered panels with
+   their title in the border, dim labels, the terminal's color roles. Charts
+   use a fixed categorical order (assigned by the day's or period's use, most
+   first), folding the rest into "Other". */
+:root {
+  color-scheme: light;
+  --bg: #f7f7f5; --panel: #fcfcfb; --border: #c9c8c2; --fg: #1b1b1a; --dim: #6b6a65; --faint: #e7e6e1;
+  --cyan: #0a8a96; --green: #2f8a2f; --yellow: #a36a00; --red: #c33b3a; --magenta: #a8457a; --sel: #e2eef6;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300; --s7: #4a3aa7;
+  --other: #a3a29c;
+  --q0: #ebeae5; --q1: #b7d3f6; --q2: #6da7ec; --q3: #2a78d6; --q4: #184f95;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #121211; --panel: #181817; --border: #3b3b38; --fg: #e6e5df; --dim: #8d8c85; --faint: #262624;
+    --cyan: #3ec7d4; --green: #6cc46c; --yellow: #e0b54b; --red: #e66767; --magenta: #d77bb0; --sel: #1f2c36;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9;
+    --other: #5f5e59;
+    --q0: #232322; --q1: #104281; --q2: #1c5cab; --q3: #3987e5; --q4: #86b6ef;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #121211; --panel: #181817; --border: #3b3b38; --fg: #e6e5df; --dim: #8d8c85; --faint: #262624;
+  --cyan: #3ec7d4; --green: #6cc46c; --yellow: #e0b54b; --red: #e66767; --magenta: #d77bb0; --sel: #1f2c36;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9;
+  --other: #5f5e59;
+  --q0: #232322; --q1: #104281; --q2: #1c5cab; --q3: #3987e5; --q4: #86b6ef;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--fg);
+  font: 13px/1.45 ui-monospace, "JetBrainsMono Nerd Font", "JetBrains Mono", "Cascadia Code", "Fira Code", Menlo, Consolas, monospace;
+  min-height: 100vh; display: flex; flex-direction: column;
+}
+.dim { color: var(--dim); }
+.cyan { color: var(--cyan); } .green { color: var(--green); } .yellow { color: var(--yellow); }
+.red { color: var(--red); } .magenta { color: var(--magenta); }
+header, footer { display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: baseline; padding: 6px 16px; }
+header { border-bottom: 1px solid var(--border); }
+header b { font-weight: 700; }
+header .right { margin-left: auto; }
+footer { border-top: 1px solid var(--border); color: var(--dim); margin-top: auto; }
+footer kbd { font: inherit; color: var(--fg); font-weight: 700; }
+nav { display: flex; gap: 2px; padding: 8px 16px 0; flex-wrap: wrap; }
+nav button { font: inherit; color: var(--dim); background: none; border: 0; padding: 2px 8px; cursor: pointer; }
+nav button.on { background: var(--fg); color: var(--bg); }
+nav button:focus-visible, .ctl:focus-visible { outline: 1px solid var(--cyan); }
+main { padding: 8px 16px 16px; display: grid; gap: 14px; }
+.panel { border: 1px solid var(--border); background: var(--panel); padding: 12px 12px 10px; position: relative; min-width: 0; }
+.panel > .title { position: absolute; top: -0.75em; left: 10px; background: var(--panel); padding: 0 6px; font-weight: 700; }
+.panel > .title .dim { font-weight: 400; }
+.controls { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
+.ctl { font: inherit; color: var(--fg); background: none; border: 1px solid var(--border); padding: 1px 8px; cursor: pointer; }
+.ctl.on { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.ctl:disabled { color: var(--faint); cursor: default; }
+input.ctl { cursor: text; min-width: 0; width: 16ch; }
+.legend { display: flex; flex-wrap: wrap; gap: 2px 14px; margin-top: 6px; }
+.legend span { white-space: nowrap; }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+svg { display: block; width: 100%; overflow: visible; }
+svg text { fill: var(--dim); font: 11px ui-monospace, Menlo, Consolas, monospace; }
+svg .grid { stroke: var(--faint); stroke-width: 1; }
+svg .now { stroke: var(--red); stroke-width: 1; stroke-dasharray: 2 2; }
+svg .hit { fill: transparent; }
+svg .away { fill: var(--faint); opacity: .55; }
+.sw.idle, .sw.asleep { border: 1px solid var(--dim); }
+.sw.idle { background: repeating-linear-gradient(135deg, var(--dim) 0 1.5px, transparent 1.5px 4px); }
+.sw.asleep { background: var(--border); }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: right; padding: 2px 8px; white-space: nowrap; }
+th:first-child, td:first-child, th.l, td.l { text-align: left; }
+th { color: var(--dim); font-weight: 400; cursor: pointer; user-select: none; }
+th.sorted { color: var(--fg); }
+tbody tr { cursor: pointer; }
+tbody tr:hover { background: var(--faint); }
+tbody tr.sel { background: var(--sel); }
+tbody tr.total td:first-child { font-weight: 700; }
+td.bar { width: 30%; min-width: 80px; }
+.table-box { max-height: min(60vh, 520px); overflow: auto; margin-top: 8px; }
+.table-box thead th { position: sticky; top: 0; background: var(--panel); }
+.barcell { height: 8px; background: var(--cyan); border-radius: 0 2px 2px 0; }
+.tag { color: var(--dim); margin-left: 6px; }
+.grid2 { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); }
+.habit { display: grid; gap: 6px; }
+.habit + .habit { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--border); }
+.habit .head { display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: baseline; }
+.log .day { margin-top: 10px; color: var(--dim); }
+.log .day:first-child { margin-top: 0; }
+.log .row { display: grid; grid-template-columns: 6ch 2ch 1fr; gap: 8px; }
+.empty { color: var(--dim); padding: 8px 0; }
+#tip {
+  position: fixed; pointer-events: none; z-index: 10; display: none; max-width: 340px;
+  background: var(--panel); border: 1px solid var(--border); padding: 6px 8px; box-shadow: 0 4px 16px rgb(0 0 0 / .25);
+}
+#tip .k { color: var(--dim); }
+@media (max-width: 640px) {
+  header .right { margin-left: 0; }
+  .hide-sm { display: none; }
+}
+</style>
+</head>
+<body>
+<header>
+  <b>habitfocus</b>
+  <span class="dim" id="clock"></span>
+  <span id="session"></span>
+  <span class="right" id="conn"><span class="dim">○ connecting…</span></span>
+</header>
+<nav id="tabs"></nav>
+<main id="main"></main>
+<footer id="keys"></footer>
+<div id="tip" role="tooltip"></div>
+<script>
+"use strict";
+
+// ---- data -------------------------------------------------------------------
+
+const VIEWS = [
+  ["timeline", "Timeline"],
+  ["screen", "Screen time"],
+  ["habits", "Habits"],
+  ["log", "Log"],
+];
+const PERIODS = [1, 7, 30, 90];
+const SLOTS = 7;            // categorical colors; the rest folds into "Other"
+const OTHER = "Other";
+const UNCATEGORIZED = "Uncategorized";
+const HOUR = 3600e3, DAY = 24 * HOUR;
+
+const ui = {
+  view: "timeline",
+  snapshot: null,
+  connected: null,
+  seq: null,
+  // Timeline
+  offset: 0,
+  byApp: false,
+  fit: true,           // the hours with activity, else the whole day
+  // Screen time
+  days: 7,
+  byCategory: false,
+  filter: "",
+  selected: null,      // row label; null is the total
+  sort: ["total", -1],
+  // Log
+  logFilter: "",
+  data: {},            // last response per view
+  error: null,
+};
+
+async function api(cmd, params = {}) {
+  const res = await fetch(`/api/${cmd}?${new URLSearchParams(params)}`);
+  let body = {};
+  try { body = await res.json(); } catch { /* not JSON */ }
+  if (!res.ok || !body.ok) throw new Error(body.error || `${res.status} ${res.statusText}`);
+  if (body.snapshot) setSnapshot(body.snapshot);
+  return body;
+}
+
+// ---- formatting ---------------------------------------------------------------
+
+/** Like format_duration_long: `6d 23h`, `5h 12m`, `12m`, `45s`. */
+function dur(ms) {
+  const s = Math.floor(ms / 1000), d = Math.floor(s / 86400), h = Math.floor(s / 3600) % 24, m = Math.floor(s / 60) % 60;
+  if (!d && !h && !m) return `${s}s`;
+  if (!d && !h) return `${m}m`;
+  if (!d) return `${h}h ${m}m`;
+  return `${d}d ${h}h`;
+}
+/** Like format_duration: `1:05:09`, `12:30`. */
+function clockDur(ms) {
+  const s = Math.floor(ms / 1000), h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, r = s % 60;
+  const pad = n => String(n).padStart(2, "0");
+  return h ? `${h}:${pad(m)}:${pad(r)}` : `${m}:${pad(r)}`;
+}
+const hm = t => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+const dateLabel = t => new Date(t).toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" });
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
+function displayKey(key) {
+  const names = ui.snapshot?.app_names ?? {};
+  return names[key] ?? key.replace(/^site:/, "").replace(/^term:/, "");
+}
+function keyTag(key) {
+  if (key?.startsWith("site:")) return "site";
+  if (key?.startsWith("term:")) return "term";
+  return "";
+}
+/** `YYYY-MM-DD` as a local date, for labels. */
+function civil(date) {
+  const [y, m, d] = date.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+function relDay(offset, date) {
+  if (offset === 0) return "Today";
+  if (offset === 1) return "Yesterday";
+  return civil(date).toLocaleDateString([], { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+}
+
+// ---- colors -----------------------------------------------------------------
+
+/** Colors by label: the `SLOTS` largest in their fixed order, the rest "Other". */
+function palette(totals) {
+  const ranked = [...totals.entries()].filter(([l]) => l !== OTHER).sort((a, b) => b[1] - a[1]).map(([l]) => l);
+  const colors = new Map(ranked.slice(0, SLOTS).map((l, i) => [l, `var(--s${i + 1})`]));
+  return {
+    labels: ranked.slice(0, SLOTS),
+    folded: ranked.length > SLOTS,
+    fold: l => (colors.has(l) ? l : OTHER),
+    color: l => colors.get(l) ?? "var(--other)",
+  };
+}
+function legend(pal, habits = new Set()) {
+  const items = pal.labels.map(l => `<span><i class="sw" style="background:${pal.color(l)}"></i>${habits.has(l) ? "✓ " : ""}${esc(l)}</span>`);
+  if (pal.folded) items.push(`<span><i class="sw" style="background:var(--other)"></i>${OTHER}</span>`);
+  return `<div class="legend">${items.join("")}</div>`;
+}
+
+// ---- tooltip ----------------------------------------------------------------
+
+const tip = document.getElementById("tip");
+document.addEventListener("pointermove", e => {
+  const target = e.target.closest?.("[data-tip]");
+  if (!target) { tip.style.display = "none"; return; }
+  tip.innerHTML = target.dataset.tip;
+  tip.style.display = "block";
+  const { innerWidth: w, innerHeight: h } = window, r = tip.getBoundingClientRect();
+  tip.style.left = `${Math.min(e.clientX + 14, w - r.width - 8)}px`;
+  tip.style.top = `${e.clientY + 16 + r.height > h ? e.clientY - r.height - 10 : e.clientY + 16}px`;
+});
+document.addEventListener("pointerleave", () => (tip.style.display = "none"));
+const tipRow = (k, v) => `<div><span class="k">${esc(k)}</span> ${esc(v)}</div>`;
+
+// ---- charts -------------------------------------------------------------------
+
+const svgNS = 'xmlns="http://www.w3.org/2000/svg"';
+
+/** A chart drawn once its box is on the page, at that box's width (so text
+    isn't stretched): `draw(width)` returns the SVG. */
+let pendingCharts = [];
+function chart(draw) {
+  pendingCharts.push(draw);
+  return `<div data-chart="${pendingCharts.length - 1}"></div>`;
+}
+function drawCharts() {
+  for (const el of main.querySelectorAll("[data-chart]")) el.innerHTML = pendingCharts[Number(el.dataset.chart)](el.clientWidth || 600);
+  pendingCharts = [];
+}
+
+/** Columns of stacked segments: `columns` is [{label, tip, parts: [{label, ms}]}]. */
+function barChart(columns, pal, opts) {
+  return chart(width => drawBars(width, columns, pal, opts));
+}
+function drawBars(width, columns, pal, { height = 140, labelEvery = 1, single = null } = {}) {
+  const left = 48, bottom = 18, top = 6;
+  const max = Math.max(1, ...columns.map(c => c.parts.reduce((s, p) => s + p.ms, 0)));
+  const step = niceStep(max);
+  const yMax = Math.ceil(max / step) * step;
+  const plotH = height - bottom - top, colW = (width - left) / columns.length;
+  const barW = Math.max(2, Math.min(28, colW - Math.max(2, colW * 0.25)));
+  const y = v => top + plotH - (v / yMax) * plotH;
+  let out = `<svg ${svgNS} viewBox="0 0 ${width} ${height}" style="height:${height}px">`;
+  for (let v = 0; v <= yMax; v += step) {
+    out += `<line class="grid" x1="${left}" x2="${width}" y1="${y(v)}" y2="${y(v)}"/>`;
+    out += `<text x="${left - 6}" y="${y(v) + 4}" text-anchor="end">${v ? dur(v) : "0"}</text>`;
+  }
+  columns.forEach((c, i) => {
+    const x = left + i * colW + (colW - barW) / 2;
+    let acc = 0;
+    const parts = c.parts.filter(p => p.ms > 0);
+    parts.forEach((p, j) => {
+      const y0 = y(acc), y1 = y(acc + p.ms);
+      acc += p.ms;
+      // A 1px surface gap between stacked segments; the top one rounds.
+      const h = Math.max(0, y0 - y1 - (j ? 1 : 0));
+      const fill = single ?? pal.color(p.label);
+      out += j === parts.length - 1
+        ? `<path d="${roundTop(x, y1, barW, h)}" fill="${fill}"/>`
+        : `<rect x="${x}" y="${y1}" width="${barW}" height="${h}" fill="${fill}"/>`;
+    });
+    if (i % labelEvery === 0) out += `<text x="${x + barW / 2}" y="${height - 4}" text-anchor="middle">${esc(c.label)}</text>`;
+    out += `<rect class="hit" x="${left + i * colW}" y="${top}" width="${colW}" height="${plotH}" data-tip="${esc(c.tip)}"/>`;
+  });
+  return out + "</svg>";
+}
+function roundTop(x, y, w, h) {
+  const r = Math.min(2, h, w / 2);
+  return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`;
+}
+function niceStep(max) {
+  const steps = [5, 10, 15, 30, 60, 120, 180, 240, 360, 480, 720, 1440].map(m => m * 60e3);
+  return steps.find(s => max / s <= 4) ?? Math.ceil(max / 4 / (24 * HOUR)) * 24 * HOUR;
+}
+function columnTip(title, parts, habits = new Set()) {
+  const total = parts.reduce((s, p) => s + p.ms, 0);
+  const lines = parts.filter(p => p.ms > 0).sort((a, b) => b.ms - a.ms)
+    .map(p => tipRow(dur(p.ms), (habits.has(p.label) ? "✓ " : "") + p.label));
+  return `<div><b>${esc(title)}</b> ${esc(total ? dur(total) : "nothing")}</div>${lines.join("")}`;
+}
+
+// ---- header / footer ----------------------------------------------------------
+
+function setSnapshot(s) {
+  ui.snapshot = s;
+  setConnected(true);
+}
+function setConnected(ok, error) {
+  if (ui.connected === ok && ok) return renderHeader();
+  ui.connected = ok;
+  document.getElementById("conn").innerHTML = ok
+    ? '<span class="green">● connected</span>'
+    : `<span class="red" title="${esc(error)}">○ habitd not reachable</span>`;
+  renderHeader();
+}
+function renderHeader() {
+  const s = ui.snapshot;
+  document.getElementById("clock").textContent =
+    new Date().toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hour12: false });
+  const el = document.getElementById("session");
+  const session = s?.session;
+  if (!session) {
+    el.innerHTML = s ? `<span class="dim">no session · ${s.habits.filter(h => h.done_today).length}/${s.habits.length} habits done</span>` : "";
+    return;
+  }
+  const color = session.running ? "green" : "yellow";
+  const progress = session.target_ms ? ` / ${clockDur(session.target_ms)}` : "";
+  el.innerHTML = `<span class="${color}">${session.running ? "▶" : "‖"} ${esc(session.name)} ${clockDur(session.elapsed_ms)}${progress}</span>`;
+}
+function renderTabs() {
+  document.getElementById("tabs").innerHTML = VIEWS.map(([id, title], i) =>
+    `<button data-view="${id}" class="${id === ui.view ? "on" : ""}">${i + 1} ${title}</button>`).join("");
+  const keys = {
+    timeline: [["[ ]", "day"], ["t", "today"], ["z", ui.fit ? "24h" : "fit"], ["g", ui.byApp ? "by habit/category" : "by app"]],
+    screen: [["p", "period"], ["g", ui.byCategory ? "apps" : "categories"], ["f", "filter"], ["j/k", "select"]],
+    habits: [],
+    log: [["f", "filter"]],
+  }[ui.view];
+  document.getElementById("keys").innerHTML = [["1-4", "views"], ...keys, ["r", "refresh"]]
+    .map(([k, l]) => `<span><kbd>${k}</kbd> ${l}</span>`).join("");
+}
+document.getElementById("tabs").addEventListener("click", e => {
+  const view = e.target.closest("button")?.dataset.view;
+  if (view) show(view);
+});
+
+// ---- views --------------------------------------------------------------------
+
+const main = document.getElementById("main");
+
+function show(view) {
+  ui.view = view;
+  history.replaceState(null, "", `#${view}`);
+  try { localStorage.setItem("hf-web-view", view); } catch { /* storage unavailable */ }
+  renderTabs();
+  load();
+}
+
+async function load() {
+  const view = ui.view;
+  try {
+    ui.data[view] = await fetchView(view);
+    ui.error = null;
+  } catch (e) {
+    ui.error = e.message;
+    if (/habitd|connect|socket|503/i.test(e.message)) setConnected(false, e.message);
+  }
+  if (view === ui.view) render();
+}
+
+function fetchView(view) {
+  switch (view) {
+    case "timeline": return api("timeline", { day_offset: ui.offset });
+    case "screen": return api("app_stats", { days: ui.days });
+    case "habits": return api("stats", { days: 371 });
+    case "log": return api("events", { limit: 2000 });
+  }
+}
+
+function render() {
+  const data = ui.data[ui.view];
+  if (!data) {
+    // A habitd from before this page doesn't know its newer requests.
+    const message = /unknown variant/.test(ui.error ?? "")
+      ? 'habitd is older than this page; restart it: <span class="cyan">systemctl --user restart habitd</span>'
+      : ui.error ? `<span class="red">${esc(ui.error)}</span>` : "Loading…";
+    main.innerHTML = `<div class="panel"><div class="empty">${message}</div></div>`;
+    return;
+  }
+  const keepFocus = document.activeElement?.id;
+  pendingCharts = [];
+  ({ timeline: renderTimeline, screen: renderScreen, habits: renderHabits, log: renderLog })[ui.view](data);
+  drawCharts();
+  if (keepFocus) {
+    const el = document.getElementById(keepFocus);
+    if (el) { el.focus(); if (el.setSelectionRange) el.setSelectionRange(el.value.length, el.value.length); }
+  }
+}
+
+// ---- Timeline -----------------------------------------------------------------
+
+/** What a visit counts as, like the hourly chart: habit, else category, else app. */
+const visitLabel = v => v.habit ?? v.category ?? v.name;
+
+function renderTimeline({ timeline, breakdown }) {
+  const visits = timeline.visits;
+  const habits = new Set(visits.filter(v => v.habit).map(v => v.habit));
+  const totals = new Map();
+  for (const v of visits) totals.set(visitLabel(v), (totals.get(visitLabel(v)) ?? 0) + v.active_ms);
+  const pal = palette(totals);
+  const active = visits.reduce((s, v) => s + v.active_ms, 0);
+  const afk = timeline.afk ?? [];
+  const away = afk.reduce((s, a) => s + a.end_ms - a.start_ms, 0);
+
+  // Lanes: what the time counted as (folded like the colors), or each app.
+  const laneOf = ui.byApp ? (v => v.name) : (v => pal.fold(visitLabel(v)));
+  const lanes = new Map();
+  for (const v of visits) {
+    const lane = laneOf(v);
+    if (!lanes.has(lane)) lanes.set(lane, { label: lane, ms: 0, visits: [], tag: ui.byApp ? keyTag(v.key) : "" });
+    const l = lanes.get(lane);
+    l.ms += v.active_ms;
+    l.visits.push(v);
+  }
+  const ordered = [...lanes.values()].sort((a, b) => (a.label === OTHER) - (b.label === OTHER) || b.ms - a.ms);
+
+  const nav = `<div class="controls">
+      <button class="ctl" data-act="prev" ${timeline.more_before ? "" : "disabled"} title="[">◀</button>
+      <b>${esc(relDay(timeline.offset, timeline.date))}</b>
+      <button class="ctl" data-act="next" ${timeline.offset ? "" : "disabled"} title="]">▶</button>
+      <span class="dim">${dur(active)} on screen · ${visits.length} visits${afk.length ? ` · ${dur(away)} away` : ""}</span>
+      <span style="margin-left:auto"><button class="ctl ${ui.fit ? "on" : ""}" data-act="fit">fit</button>
+      <button class="ctl ${ui.fit ? "" : "on"}" data-act="whole">24h</button></span>
+      <span><button class="ctl ${ui.byApp ? "" : "on"}" data-act="lanes-label">by habit/category</button>
+      <button class="ctl ${ui.byApp ? "on" : ""}" data-act="lanes-app">by app</button></span>
+    </div>`;
+
+  main.innerHTML = `
+    <div class="panel"><span class="title">Day</span>${nav}</div>
+    <div class="panel"><span class="title">Hours <span class="dim">· on screen per hour</span></span>
+      ${hoursOfDay(timeline, breakdown, pal, habits)}${legend(pal, habits)}</div>
+    <div class="panel"><span class="title">Timeline <span class="dim">· ${ui.byApp ? "per app, colored by what it counted as" : "what the time went to"}</span></span>
+      ${visits.length || afk.length ? `<div class="scroll">${lanesChart(timeline, ordered, pal)}</div>
+        <div class="legend dim">${afk.length ? '<span><i class="sw idle"></i>AFK: idle</span><span><i class="sw asleep"></i>AFK: asleep (suspended)</span><span>shaded across the lanes too</span>' : "<span>no AFK recorded on this day</span>"}</div>`
+        : '<div class="empty">Nothing recorded on this day.</div>'}</div>`;
+}
+
+function hoursOfDay(timeline, breakdown, pal, habits) {
+  // The logical day may start at day_start (e.g. 04:00): hours run from there.
+  const first = new Date(timeline.from_ms).getHours();
+  const hours = Array.from({ length: 24 }, (_, i) => (first + i) % 24);
+  const byHour = new Map(hours.map(h => [h, new Map()]));
+  for (const s of breakdown?.slices ?? []) {
+    const m = byHour.get(s.hour), l = pal.fold(s.label);
+    m.set(l, (m.get(l) ?? 0) + s.ms);
+  }
+  const order = [...pal.labels, OTHER];
+  const columns = hours.map(h => {
+    const parts = order.map(l => ({ label: l, ms: byHour.get(h).get(l) ?? 0 }));
+    return { label: String(h).padStart(2, "0"), parts, tip: columnTip(`${String(h).padStart(2, "0")}:00`, parts, habits) };
+  });
+  return barChart(columns, pal, { height: 130, labelEvery: 3 });
+}
+
+function lanesChart(timeline, lanes, pal) {
+  return chart(width => drawLanes(Math.max(300, width), timeline, lanes, pal));
+}
+/** The part of the day the timeline shows: whole hours around the visits
+    (and now, today), at least three, or the whole day. */
+function timelineRange(timeline) {
+  const { from_ms: from, to_ms: to } = timeline;
+  // Around the visits; AFK alone only on a day without any.
+  const spans = timeline.visits.length ? timeline.visits : timeline.afk ?? [];
+  if (!ui.fit || !spans.length) return [from, to];
+  let start = Math.min(...spans.map(v => v.start_ms));
+  let end = Math.max(...spans.map(v => v.end_ms));
+  if (timeline.offset === 0) end = Math.max(end, Math.min(ui.snapshot?.now_ms ?? Date.now(), to));
+  start = Math.max(from, Math.floor(start / HOUR) * HOUR);
+  end = Math.min(to, Math.ceil(end / HOUR) * HOUR);
+  if (end - start < 3 * HOUR) {
+    end = Math.min(to, start + 3 * HOUR);
+    start = Math.max(from, end - 3 * HOUR);
+  }
+  return [start, end];
+}
+
+function drawLanes(width, timeline, lanes, pal) {
+  const labelW = width < 600 ? 120 : 170, laneH = 24, top = 4, axisH = 20;
+  const nameChars = Math.floor((labelW - 48) / 7);
+  const afk = (timeline.afk ?? []);
+  const afkGap = afk.length ? 8 : 0;
+  const rows = lanes.length + (afk.length ? 1 : 0);
+  const height = top + rows * laneH + afkGap + axisH;
+  const [from, to] = timelineRange(timeline);
+  const span = to - from;
+  // Ticks every 1, 2 or 3 hours, about one per 90px.
+  const every = [1, 2, 3].find(h => ((width - labelW) / (span / HOUR)) * h >= 90) ?? 3;
+  const x = t => labelW + ((Math.min(Math.max(t, from), to) - from) / span) * (width - labelW);
+  let out = `<svg ${svgNS} viewBox="0 0 ${width} ${height}" style="width:${width}px;height:${height}px">
+    <defs>
+      <pattern id="afk-idle" patternUnits="userSpaceOnUse" width="5" height="5" patternTransform="rotate(45)">
+        <line x1="0" y1="0" x2="0" y2="5" stroke="var(--dim)" stroke-width="2"/></pattern>
+    </defs>`;
+  const visible = afk.filter(a => a.end_ms > from && a.start_ms < to);
+  // Time away shades every lane, so it reads as "nobody was here".
+  for (const a of visible) {
+    out += `<rect class="away" x="${x(a.start_ms)}" y="${top}" width="${Math.max(1, x(a.end_ms) - x(a.start_ms))}" height="${lanes.length * laneH}"/>`;
+  }
+  // Every three local hours, from the first full hour of the day.
+  const tick = new Date(from);
+  tick.setMinutes(0, 0, 0);
+  if (tick.getTime() < from) tick.setHours(tick.getHours() + 1);
+  for (; tick.getTime() <= to; tick.setHours(tick.getHours() + 1)) {
+    if (tick.getHours() % every) continue;
+    const tx = x(tick.getTime());
+    out += `<line class="grid" x1="${tx}" x2="${tx}" y1="${top}" y2="${height - axisH}"/>`;
+    const anchor = tx > width - 20 ? "end" : tx < labelW + 20 ? "start" : "middle";
+    out += `<text x="${tx}" y="${height - 5}" text-anchor="${anchor}">${String(tick.getHours()).padStart(2, "0")}:00</text>`;
+  }
+  lanes.forEach((lane, i) => {
+    const y = top + i * laneH;
+    const name = lane.label.length > nameChars ? lane.label.slice(0, nameChars - 1) + "…" : lane.label;
+    out += `<line class="grid" x1="${labelW}" x2="${width}" y1="${y + laneH}" y2="${y + laneH}"/>`;
+    out += `<text x="0" y="${y + 16}" style="fill:var(--fg)">${esc(name)}</text>`;
+    out += `<text x="${labelW - 8}" y="${y + 16}" text-anchor="end">${dur(lane.ms)}</text>`;
+    for (const v of lane.visits) {
+      if (v.end_ms <= from || v.start_ms >= to) continue;
+      const x0 = x(v.start_ms), w = Math.max(1.5, x(v.end_ms) - x0);
+      const tipHtml = `<div><b>${esc(v.name)}</b>${keyTag(v.key) ? ` <span class="k">${keyTag(v.key)}</span>` : ""}</div>`
+        + (v.habit ? tipRow("habit", "✓ " + v.habit) : "")
+        + (v.category ? tipRow("category", v.category) : "")
+        + tipRow("time", `${hm(v.start_ms)}–${hm(v.end_ms)}`)
+        + tipRow("active", `${dur(v.active_ms)} of ${dur(v.end_ms - v.start_ms)}`);
+      out += `<rect x="${x0}" y="${y + 5}" width="${w}" height="${laneH - 10}" rx="${w > 4 ? 2 : 0}" fill="${pal.color(pal.fold(visitLabel(v)))}" data-tip="${esc(tipHtml)}"/>`;
+    }
+  });
+  if (afk.length) {
+    const y = top + lanes.length * laneH + afkGap;
+    out += `<line class="grid" x1="0" x2="${width}" y1="${y - afkGap / 2}" y2="${y - afkGap / 2}" stroke-dasharray="3 3"/>`;
+    out += `<text x="0" y="${y + 16}" style="fill:var(--fg)">AFK</text>`;
+    out += `<text x="${labelW - 8}" y="${y + 16}" text-anchor="end">${dur(afk.reduce((s, a) => s + a.end_ms - a.start_ms, 0))}</text>`;
+    for (const a of visible) {
+      const x0 = x(a.start_ms), w = Math.max(1.5, x(a.end_ms) - x0);
+      const asleep = a.reason === "asleep";
+      const tipHtml = `<div><b>AFK</b> <span class="k">${asleep ? "asleep (suspended)" : "idle"}</span></div>`
+        + tipRow("time", `${hm(a.start_ms)}–${hm(a.end_ms)}`)
+        + tipRow("for", dur(a.end_ms - a.start_ms))
+        + (asleep ? "" : `<div class="k">from when idle began, after ${esc(ui.snapshot?.settings?.idle_timeout ?? "the idle timeout")} without input</div>`);
+      out += `<rect x="${x0}" y="${y + 5}" width="${w}" height="${laneH - 10}" rx="${w > 4 ? 2 : 0}" fill="${asleep ? "var(--border)" : "url(#afk-idle)"}" stroke="var(--dim)" stroke-width="${w > 3 ? 1 : 0}" data-tip="${esc(tipHtml)}"/>`;
+    }
+  }
+  if (timeline.offset === 0) {
+    const now = ui.snapshot?.now_ms ?? Date.now();
+    if (now > from && now < to) {
+      out += `<line class="now" x1="${x(now)}" x2="${x(now)}" y1="${top}" y2="${height - axisH}"/>`;
+    }
+  }
+  return out + "</svg>";
+}
+
+// ---- Screen time ----------------------------------------------------------------
+
+function usageRows(apps) {
+  const categories = ui.snapshot?.app_categories ?? {};
+  const filter = ui.filter.trim().toLowerCase();
+  let rows = apps.map(a => ({
+    key: a.app, label: displayKey(a.app), category: categories[a.app] ?? null,
+    today: a.today_ms, total: a.total_ms, opens: a.sessions, avg: a.avg_session_ms, longest: a.longest_session_ms,
+    hours: a.hours ?? [], days: a.days_ms ?? [], keys: [a.app],
+  })).filter(r => !filter || [r.key, r.label, r.category].some(t => t?.toLowerCase().includes(filter)));
+  if (ui.byCategory) {
+    const groups = new Map();
+    for (const r of rows) {
+      const name = r.category ?? UNCATEGORIZED;
+      const g = groups.get(name) ?? { key: null, label: name, category: null, today: 0, total: 0, opens: 0, avg: 0, longest: 0, hours: [], days: [], keys: [] };
+      addRow(g, r);
+      groups.set(name, g);
+    }
+    rows = [...groups.values()];
+    for (const g of rows) { g.opens = 0; g.avg = 0; }
+  }
+  const [col, dir] = ui.sort;
+  return rows.sort((a, b) => (typeof a[col] === "string" ? a[col].localeCompare(b[col]) : a[col] - b[col]) * dir || a.label.localeCompare(b.label));
+}
+function addRow(into, r) {
+  into.today += r.today; into.total += r.total;
+  into.longest = Math.max(into.longest, r.longest);
+  r.hours.forEach((v, i) => (into.hours[i] = (into.hours[i] ?? 0) + v));
+  r.days.forEach((v, i) => (into.days[i] = (into.days[i] ?? 0) + v));
+  into.keys.push(...r.keys);
+}
+
+function renderScreen({ app_stats: apps = [], breakdown }) {
+  const rows = usageRows(apps);
+  const total = { key: null, label: ui.filter ? "All shown" : ui.byCategory ? "All categories" : "All apps", today: 0, total: 0, longest: 0, hours: [], days: [], keys: [] };
+  rows.forEach(r => addRow(total, r));
+  if (ui.selected !== null && !rows.some(r => r.label === ui.selected)) ui.selected = null;
+  const sel = rows.find(r => r.label === ui.selected) ?? null;
+  const max = Math.max(1, ...rows.map(r => r.total));
+
+  const cols = [["label", "name", "l"], ...(ui.byCategory ? [] : [["category", "category", "l hide-sm"]]),
+    ["today", "today", ""], ["total", ui.days === 1 ? "day" : `${ui.days} days`, ""], ["opens", "opens", "hide-sm"], ["avg", "avg", "hide-sm"]];
+  const th = cols.map(([c, t, cls]) => `<th class="${cls} ${ui.sort[0] === c ? "sorted" : ""}" data-sort="${c}">${t}${ui.sort[0] === c ? (ui.sort[1] < 0 ? " ▾" : " ▴") : ""}</th>`).join("") + '<th class="l"></th>';
+  const tr = (r, isTotal) => {
+    const cells = [`<td>${esc(r.label)}${!isTotal && keyTag(r.key) ? `<span class="tag">${keyTag(r.key)}</span>` : ""}</td>`];
+    if (!ui.byCategory) cells.push(`<td class="l dim hide-sm">${esc(r.category ?? "")}</td>`);
+    cells.push(`<td>${dur(r.today)}</td>`, `<td>${dur(r.total)}</td>`,
+      `<td class="hide-sm">${!isTotal && r.opens ? r.opens : '<span class="dim">-</span>'}</td>`,
+      `<td class="hide-sm">${!isTotal && r.opens ? dur(r.avg) : '<span class="dim">-</span>'}</td>`,
+      `<td class="bar">${isTotal ? "" : `<div class="barcell" style="width:${(r.total / max) * 100}%"></div>`}</td>`);
+    const selected = isTotal ? sel === null : sel === r;
+    return `<tr class="${isTotal ? "total" : ""} ${selected ? "sel" : ""}" data-row="${isTotal ? "" : esc(r.label)}">${cells.join("")}</tr>`;
+  };
+
+  const controls = `<div class="controls">
+      <span>${PERIODS.map(d => `<button class="ctl ${d === ui.days ? "on" : ""}" data-days="${d}">${d === 1 ? "today" : d + "d"}</button>`).join(" ")}</span>
+      <span><button class="ctl ${ui.byCategory ? "" : "on"}" data-act="apps">apps</button>
+      <button class="ctl ${ui.byCategory ? "on" : ""}" data-act="categories">categories</button></span>
+      <input class="ctl" id="filter" placeholder="f filter…" value="${esc(ui.filter)}" autocomplete="off" spellcheck="false">
+    </div>`;
+
+  // Hours: stacked by what the time went to for the total, one series for a row.
+  const shown = new Set(rows.flatMap(r => r.keys));
+  const hourPanel = sel ? singleHours(sel) : stackedHours(breakdown, shown);
+  const daysPanel = ui.days > 1 ? perDay(sel ?? total) : "";
+
+  main.innerHTML = `
+    <div class="panel"><span class="title">Screen time</span>${controls}
+      <div class="table-box"><table><thead><tr>${th}</tr></thead>
+      <tbody>${tr(total, true)}${rows.map(r => tr(r, false)).join("")}</tbody></table></div>
+      ${rows.length ? "" : '<div class="empty">Nothing matches.</div>'}</div>
+    <div class="grid2">
+      <div class="panel"><span class="title">Time of day <span class="dim">· ${esc(sel?.label ?? total.label)}</span></span>${hourPanel}</div>
+      ${daysPanel}
+    </div>`;
+}
+function stackedHours(breakdown, shown) {
+  const slices = (breakdown?.slices ?? []).filter(s => shown.has(s.key));
+  const habits = new Set(slices.filter(s => s.habit).map(s => s.label));
+  const totals = new Map();
+  for (const s of slices) totals.set(s.label, (totals.get(s.label) ?? 0) + s.ms);
+  const pal = palette(totals);
+  const order = [...pal.labels, OTHER];
+  const columns = Array.from({ length: 24 }, (_, h) => {
+    const m = new Map();
+    for (const s of slices.filter(s => s.hour === h)) m.set(pal.fold(s.label), (m.get(pal.fold(s.label)) ?? 0) + s.ms);
+    const parts = order.map(l => ({ label: l, ms: m.get(l) ?? 0 }));
+    return { label: String(h).padStart(2, "0"), parts, tip: columnTip(`${String(h).padStart(2, "0")}:00`, parts, habits) };
+  });
+  return barChart(columns, pal, { labelEvery: 3 }) + legend(pal, habits);
+}
+function singleHours(row) {
+  const columns = Array.from({ length: 24 }, (_, h) => {
+    const parts = [{ label: row.label, ms: row.hours[h] ?? 0 }];
+    return { label: String(h).padStart(2, "0"), parts, tip: columnTip(`${String(h).padStart(2, "0")}:00`, parts) };
+  });
+  return barChart(columns, null, { labelEvery: 3, single: "var(--s1)" });
+}
+function perDay(row) {
+  const today = new Date();
+  today.setHours(12, 0, 0, 0);
+  const n = row.days.length;
+  const columns = row.days.map((ms, i) => {
+    const t = today.getTime() - (n - 1 - i) * DAY;
+    const label = n > 14 ? new Date(t).toLocaleDateString([], { day: "numeric", month: "numeric" }) : new Date(t).toLocaleDateString([], { weekday: "short" });
+    return { label, parts: [{ label: row.label, ms }], tip: columnTip(dateLabel(t), [{ label: row.label, ms }]) };
+  });
+  if (!columns.length) return "";
+  const every = n > 60 ? 14 : n > 14 ? 7 : 1;
+  return `<div class="panel"><span class="title">Per day <span class="dim">· ${esc(row.label)}</span></span>
+    ${barChart(columns, null, { labelEvery: every, single: "var(--s1)" })}</div>`;
+}
+
+// ---- Habits -------------------------------------------------------------------
+
+function renderHabits({ stats = [] }) {
+  const s = ui.snapshot;
+  const habits = s?.habits ?? [];
+  if (!habits.length) {
+    main.innerHTML = '<div class="panel"><div class="empty">No habits configured.</div></div>';
+    return;
+  }
+  const byDay = new Map(stats.map(d => [d.date, d.habits]));
+  const done = habits.filter(h => h.done_today).length;
+  const summary = `<div class="controls">
+      <span>streak <b class="${s.streak_days ? "yellow" : "dim"}">${s.streak_days} ${s.streak_days === 1 ? "day" : "days"}</b></span>
+      <span>today <b>${done}/${habits.length}</b> done</span>
+      <span class="dim">a day counts with at least one completion</span></div>`;
+  main.innerHTML = `
+    <div class="panel"><span class="title">Streaks</span>${summary}</div>
+    <div class="panel"><span class="title">Last year <span class="dim">· darker is more · ringed days were completed</span></span>
+      ${habits.map(h => habitBlock(h, stats, byDay)).join("")}
+      <div class="legend dim" style="margin-top:12px">less ${[0, 1, 2, 3, 4].map(q => `<i class="sw" style="background:var(--q${q})"></i>`).join("")} more</div>
+    </div>`;
+}
+function habitBlock(h, stats, byDay) {
+  const logged = h.kind === "manual" || h.kind === "counter";
+  const value = d => (logged ? d?.count ?? 0 : d?.focused_ms ?? 0);
+  const days = stats.map(d => ({ date: d.date, stat: d.habits[h.id] }));
+  const values = days.map(d => value(d.stat)).filter(v => v > 0).sort((a, b) => a - b);
+  const quart = q => values[Math.min(values.length - 1, Math.floor(values.length * q))] ?? 1;
+  const level = v => (v <= 0 ? 0 : v <= quart(0.25) ? 1 : v <= quart(0.5) ? 2 : v <= quart(0.75) ? 3 : 4);
+  const total = days.reduce((s, d) => s + value(d.stat), 0);
+  const completed = days.filter(d => d.stat?.completions > 0).length;
+  const fmt = v => (logged ? `${v}${h.unit ? " " + h.unit : ""}` : dur(v));
+
+  // Weeks as columns, Monday on top, like a contribution calendar.
+  const cell = 11, gap = 3, left = 28, top = 14;
+  const first = days.length ? civil(days[0].date) : new Date();
+  const lead = (first.getDay() + 6) % 7;
+  const weeks = Math.ceil((lead + days.length) / 7);
+  const width = left + weeks * (cell + gap), height = top + 7 * (cell + gap);
+  let out = `<svg ${svgNS} viewBox="0 0 ${width} ${height}" style="width:${width}px;max-width:none;height:${height}px">`;
+  ["Mon", "", "Wed", "", "Fri", "", ""].forEach((d, i) => d && (out += `<text x="0" y="${top + i * (cell + gap) + 9}">${d}</text>`));
+  let month = -1;
+  days.forEach((d, i) => {
+    const pos = lead + i, wx = Math.floor(pos / 7), wd = pos % 7;
+    const x = left + wx * (cell + gap), y = top + wd * (cell + gap);
+    const date = civil(d.date);
+    if (wd === 0 || i === 0) {
+      if (date.getMonth() !== month && (wd === 0 || i === 0) && date.getDate() <= 7) {
+        month = date.getMonth();
+        out += `<text x="${x}" y="10">${date.toLocaleDateString([], { month: "short" })}</text>`;
+      }
+    }
+    const v = value(d.stat), ok = d.stat?.completions > 0;
+    const tipHtml = `<div><b>${esc(dateLabel(date))}</b></div>` + tipRow(logged ? "logged" : "focused", v ? fmt(v) : "nothing")
+      + (ok ? tipRow("completed", d.stat.completions > 1 ? `${d.stat.completions}×` : "✓") : "");
+    out += `<rect x="${x}" y="${y}" width="${cell}" height="${cell}" rx="2" fill="var(--q${level(v)})"
+      ${ok ? 'stroke="var(--green)" stroke-width="1.5"' : ""} data-tip="${esc(tipHtml)}"/>`;
+  });
+  out += "</svg>";
+  const streak = h.streak_days ? `<span class="yellow">${h.streak_days}d streak</span>` : '<span class="dim">no streak</span>';
+  return `<div class="habit">
+    <div class="head"><b>${esc(h.name)}</b>${h.done_today ? '<span class="green">✓ today</span>' : ""}
+      ${streak}<span class="dim">best ${h.best_streak_days}d · ${completed} days completed · ${fmt(total)} in total</span></div>
+    <div class="scroll">${out}</div></div>`;
+}
+
+// ---- Log --------------------------------------------------------------------
+
+const KIND_MARK = {
+  habit_completed: ["✓", "green"], round_completed: ["✓", "green"], count_logged: ["+", "green"],
+  session_started: ["▶", "cyan"], session_stopped: ["‖", "yellow"],
+  credit_earned: ["+", "cyan"], credit_spent: ["−", "cyan"], credit_expired: ["×", "dim"],
+  unlocked: ["□", "green"], unlock_ended: ["■", "dim"], relocked: ["■", "dim"], usage_exhausted: ["■", "red"],
+  block_enforced: ["■", "red"], schedule_opened: ["◇", "dim"], schedule_closed: ["◆", "dim"],
+  penalty_started: ["!", "red"], penalty_ended: ["!", "dim"],
+  lock_started: ["⚿", "magenta"], lock_extended: ["⚿", "magenta"], lock_end_requested: ["⚿", "yellow"], lock_ended: ["⚿", "dim"],
+  daemon_started: ["·", "dim"], config_reloaded: ["·", "dim"],
+};
+function renderLog({ events = [] }) {
+  const filter = ui.logFilter.trim().toLowerCase();
+  const shown = events.filter(e => !filter || e.text.toLowerCase().includes(filter) || e.kind.includes(filter) || e.subject?.toLowerCase().includes(filter));
+  let html = "", day = "";
+  for (const e of shown) {
+    const d = dateLabel(e.at);
+    if (d !== day) { day = d; html += `<div class="day">${esc(d)}</div>`; }
+    const [mark, color] = KIND_MARK[e.kind] ?? ["·", "dim"];
+    html += `<div class="row"><span class="dim">${hm(e.at)}</span><span class="${color}">${mark}</span><span>${esc(e.text)}</span></div>`;
+  }
+  main.innerHTML = `<div class="panel log"><span class="title">Activity <span class="dim">· ${shown.length} of ${events.length}</span></span>
+    <div class="controls" style="margin-bottom:8px"><input class="ctl" id="logfilter" placeholder="f filter…" value="${esc(ui.logFilter)}" autocomplete="off" spellcheck="false"></div>
+    ${html || '<div class="empty">Nothing yet.</div>'}</div>`;
+}
+
+// ---- input --------------------------------------------------------------------
+
+main.addEventListener("click", e => {
+  const t = e.target.closest("[data-act],[data-days],[data-sort],tr[data-row]");
+  if (!t) return;
+  if (t.dataset.days) { ui.days = Number(t.dataset.days); return load(); }
+  if (t.dataset.sort) {
+    const c = t.dataset.sort;
+    ui.sort = ui.sort[0] === c ? [c, -ui.sort[1]] : [c, c === "label" || c === "category" ? 1 : -1];
+    return render();
+  }
+  if (t.dataset.row !== undefined) { ui.selected = t.dataset.row || null; return render(); }
+  switch (t.dataset.act) {
+    case "prev": return stepDay(1);
+    case "next": return stepDay(-1);
+    case "fit": ui.fit = true; return render();
+    case "whole": ui.fit = false; return render();
+    case "lanes-label": ui.byApp = false; renderTabs(); return render();
+    case "lanes-app": ui.byApp = true; renderTabs(); return render();
+    case "apps": ui.byCategory = false; renderTabs(); return render();
+    case "categories": ui.byCategory = true; renderTabs(); return render();
+  }
+});
+main.addEventListener("input", e => {
+  if (e.target.id === "filter") { ui.filter = e.target.value; render(); }
+  if (e.target.id === "logfilter") { ui.logFilter = e.target.value; render(); }
+});
+
+function stepDay(delta) {
+  const t = ui.data.timeline?.timeline;
+  if (delta > 0 && t && !t.more_before) return;
+  ui.offset = Math.max(0, ui.offset + delta);
+  load();
+}
+
+document.addEventListener("keydown", e => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const typing = e.target.matches?.("input");
+  if (typing) {
+    if (e.key === "Escape") {
+      if (e.target.id === "filter") ui.filter = "";
+      if (e.target.id === "logfilter") ui.logFilter = "";
+      e.target.blur();
+      render();
+    } else if (e.key === "Enter") e.target.blur();
+    return;
+  }
+  const n = Number(e.key);
+  if (n >= 1 && n <= VIEWS.length) return show(VIEWS[n - 1][0]);
+  if (e.key === "r") return load();
+  if (ui.view === "timeline") {
+    if (e.key === "[") return stepDay(1);
+    if (e.key === "]") return stepDay(-1);
+    if (e.key === "t") { ui.offset = 0; return load(); }
+    if (e.key === "g") { ui.byApp = !ui.byApp; renderTabs(); return render(); }
+    if (e.key === "z") { ui.fit = !ui.fit; renderTabs(); return render(); }
+  }
+  if (ui.view === "screen") {
+    if (e.key === "g") { ui.byCategory = !ui.byCategory; ui.selected = null; renderTabs(); return render(); }
+    if (e.key === "p") { ui.days = PERIODS[(PERIODS.indexOf(ui.days) + 1) % PERIODS.length]; return load(); }
+    if (e.key === "f") { e.preventDefault(); return document.getElementById("filter")?.focus(); }
+    if (e.key === "j" || e.key === "k" || e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const labels = [null, ...usageRows(ui.data.screen?.app_stats ?? []).map(r => r.label)];
+      const i = labels.indexOf(ui.selected) + (e.key === "j" || e.key === "ArrowDown" ? 1 : -1);
+      ui.selected = labels[Math.max(0, Math.min(labels.length - 1, i))];
+      return render();
+    }
+  }
+  if (ui.view === "log" && e.key === "f") { e.preventDefault(); return document.getElementById("logfilter")?.focus(); }
+});
+
+// ---- refresh --------------------------------------------------------------------
+
+/** The header every 10 s; the view again when something was logged, or every
+    minute for views of today. */
+let lastLoad = Date.now();
+async function poll() {
+  try {
+    const { snapshot } = await api("status");
+    const changed = ui.seq !== null && snapshot.events_seq !== ui.seq;
+    ui.seq = snapshot.events_seq;
+    const today = ui.view !== "timeline" || ui.offset === 0;
+    if ((changed || (today && Date.now() - lastLoad > 60e3)) && !document.activeElement?.matches("input")) {
+      lastLoad = Date.now();
+      load();
+    } else if (!ui.data[ui.view]) {
+      load();
+    }
+  } catch (e) {
+    setConnected(false, e.message);
+    if (!ui.data[ui.view]) { ui.error = e.message; render(); }
+  }
+}
+window.addEventListener("resize", () => ui.data[ui.view] && render());
+
+// The view from the address (`#screen`), else the last one.
+let saved = location.hash.slice(1);
+try { saved ||= localStorage.getItem("hf-web-view"); } catch { /* storage unavailable */ }
+if (VIEWS.some(([id]) => id === saved)) ui.view = saved;
+renderTabs();
+render();
+poll();
+setInterval(poll, 10e3);
+</script>
+</body>
+</html>

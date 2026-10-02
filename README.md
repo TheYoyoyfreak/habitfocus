@@ -103,6 +103,7 @@ hf apps --app youtube     # one app or site (all matching hosts summed), --days 
 hf rename steam_app_275850 "No Man's Sky"   # a readable name for an app id or site key
 hf category steam_app_275850 Games          # put it in a category
 hf apps --by-category     # screen time per category; --app games filters by app, site or category
+hf web --open             # insights in the browser: timeline, screen time, habits, log
 hf lock 7d                # commitment: no easier rules for a week (see below)
 hf set day_start 04:00    # settings: day_start, idle_timeout, emergency_penalty, expiry_warning,
                           #           notifications, sound
@@ -217,6 +218,7 @@ live in `state.json` (the last `screen_time_days`, default 60). Everything that 
 - **visits**: every stretch of focus on an app or site, with start, end and active time. From these come how often
   you open something (visits less than a minute apart count as one), the average and longest session, and use per
   hour of the day. They're recorded from the version that introduced the database on; totals from before stay.
+- **afk**: every stretch away from the computer, idle or asleep (suspended), for the timeline in `hf web`.
 - **events**: the full activity log (`hf events --limit 1000` reaches back as far as you like).
 - **sessions**: every habit session.
 
@@ -261,6 +263,23 @@ time still counts there for the app it ran in.
 
 `f` in Insights filters like btop: type and the table narrows to apps, sites or categories containing the text, and
 the total and the chart follow. `enter` keeps the filter, `esc` clears it.
+
+### Insights in the browser
+
+`hf web` serves a read-only page on `http://127.0.0.1:5601` (`--port` for another, `--open` opens it). It looks like
+the TUI and shows what doesn't fit in a terminal:
+
+- **Timeline**: every visit of a day on a time axis, one lane per habit, category or app (`g`), like ActivityWatch.
+  Hover a block for the app, the time and how much of it was active. An **AFK** lane below shows when you were
+  away: idle (no input for `idle_timeout`, hatched) or asleep (suspended, solid), and shades the other lanes at
+  those times. `[`/`]` step through days, `z` switches between the active hours and the whole day.
+- **Screen time**: the Insights table for today, 7, 30 or 90 days (`p`), sortable, with the hours of the day and
+  the time per day of the total or the row you pick (`j`/`k`, or a click). `f` filters, `g` totals per category.
+- **Habits**: a year heatmap per habit, completed days ringed, with streaks.
+- **Log**: the activity log by day, with a filter.
+
+It runs until you stop it and only answers on 127.0.0.1. Nothing on the page can change anything: it passes only
+requests that read through to habitd.
 
 Only habitd writes the database; `hf` asks it through the socket. It's plain SQLite, so
 `sqlite3 ~/.local/state/habitfocus/history.db` works for your own queries.

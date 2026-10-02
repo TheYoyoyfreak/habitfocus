@@ -3,6 +3,7 @@ mod setup;
 mod stats_view;
 mod tui;
 mod update;
+mod web;
 
 use anyhow::{bail, Context};
 use clap::{Parser, Subcommand};
@@ -77,6 +78,15 @@ enum Command {
         /// App id or site key as `hf apps --json` lists it
         app: String,
         category: Option<String>,
+    },
+    /// Insights in the browser: timeline, screen time, habits and the log
+    /// (read-only, served on 127.0.0.1)
+    Web {
+        #[arg(long, default_value_t = web::DEFAULT_PORT)]
+        port: u16,
+        /// Open the page in the default browser
+        #[arg(long)]
+        open: bool,
     },
     /// Stream updates (one JSON snapshot per line with --json)
     Watch {
@@ -191,6 +201,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Command::Tui => tui::run()?,
+        Command::Web { port, open } => web::run(port, open)?,
         Command::Events { limit, json } => {
             let events = call(Request::Events { limit })?.events.context("missing events")?;
             if json {

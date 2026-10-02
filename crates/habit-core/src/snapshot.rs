@@ -114,6 +114,49 @@ pub struct Breakdown {
     pub more_before: bool,
 }
 
+/// Every visit of one logical day, for a timeline (`timeline` request).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Timeline {
+    /// `YYYY-MM-DD` of the day.
+    pub date: String,
+    /// Days back from today (0 = today).
+    pub offset: u32,
+    /// Start and end of the logical day (unix ms), the whole day even today.
+    pub from_ms: u64,
+    pub to_ms: u64,
+    /// Something was recorded before this day, so stepping back makes sense.
+    pub more_before: bool,
+    /// Oldest first, cut to the day.
+    pub visits: Vec<TimelineVisit>,
+    /// Time away (idle or asleep), oldest first, cut to the day. Recorded
+    /// since the version that introduced it.
+    #[serde(default)]
+    pub afk: Vec<TimelineAfk>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineAfk {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub reason: crate::archive::AfkReason,
+}
+
+/// One stretch of focus on an app or site, with its labels resolved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineVisit {
+    /// App id or `site:<host>`.
+    pub key: String,
+    /// The app's display name.
+    pub name: String,
+    pub category: Option<String>,
+    /// Name of the habit whose session was counting.
+    pub habit: Option<String>,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    /// Not idle, within `start_ms`..`end_ms`.
+    pub active_ms: u64,
+}
+
 /// One logical day of stats (`stats` request).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DayView {

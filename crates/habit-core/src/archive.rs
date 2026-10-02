@@ -22,9 +22,26 @@ pub struct Visit {
     pub habit: Option<String>,
 }
 
+/// A stretch away from the computer: idle (no input for `idle_timeout`, from
+/// the moment idle was reported) or asleep (suspended: time habitd didn't see).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Afk {
+    pub start: u64,
+    pub end: u64,
+    pub reason: AfkReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AfkReason {
+    Idle,
+    Asleep,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Record {
     Event(Event),
     Session(HistoryEntry),
     Visit(Visit),
+    Afk(Afk),
 }

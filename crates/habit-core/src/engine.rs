@@ -6,9 +6,9 @@ use crate::duration::{format_duration, format_duration_config, format_duration_l
 use crate::lock::{Lock, END_DELAY_MS};
 use crate::snapshot::{
     AppUsageView, Breakdown, DayView, GroupView, HabitView, HourSlice, LockView, PauseReason, RequirementView,
-    SessionView, SettingsView, Snapshot, UpdateView,
+    SessionView, SettingsView, Snapshot, Timeline, TimelineAfk, TimelineVisit, UpdateView,
 };
-use crate::archive::{self, Record, Visit};
+use crate::archive::{self, Afk, AfkReason, Record, Visit};
 use crate::stats;
 use crate::state::{Event, EventKind, HistoryEntry, Outcome, SavedProgress, Session, State, Unlock};
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,6 +26,9 @@ pub const EXTENSION_STALE_MS: u64 = 60_000;
 pub const MAX_USAGE_STEP_MS: u64 = 5_000;
 /// Shorter visits (switching through windows) aren't archived.
 pub const MIN_VISIT_MS: u64 = 1_000;
+/// A jump at least this long between two observations is a suspend, archived
+/// as asleep.
+pub const MIN_ASLEEP_MS: u64 = 30_000;
 /// Visits of the same app or site closer together than this are one session.
 pub const SESSION_GAP_MS: u64 = 60_000;
 const HOUR_MS: u64 = 3_600_000;
@@ -145,6 +148,8 @@ pub struct Engine {
     usage_dirty: bool,
     /// The app or site focused right now, archived once focus moves on.
     visit: Option<Visit>,
+    /// Idle since then; archived as AFK once input returns.
+    afk_since: Option<u64>,
     /// Records waiting for the daemon to write them to the archive.
     archive: Vec<Record>,
     /// A newer release, as habitd's daily check found (not persisted).
@@ -192,6 +197,7 @@ impl Engine {
             app_pending: BTreeMap::new(),
             usage_dirty: false,
             visit: None,
+            afk_since: None,
             archive: Vec::new(),
             local_offset: Box::new(|_| 0),
             dirty: migrated,
@@ -297,7 +303,14 @@ impl Engine {
                 self.focused = id;
                 self.enforce_strict(&mut fx);
             }
-            Input::Idle(idle) => self.idle = idle,
+            Input::Idle(idle) => {
+                if idle && !self.idle {
+                    self.afk_since = Some(now);
+                } else if !idle {
+                    self.end_afk(now);
+                }
+                self.idle = idle;
+            }
             Input::TimerFocus { source, focused } => match focused {
                 Some(focused) => {
                     let was_focused = self.timer_clients.get(&source).is_some_and(|(f, _)| *f);
@@ -984,6 +997,11 @@ impl Engine {
         let Some(previous) = self.usage_flushed_at.replace(now) else {
             return;
         };
+        // Time habitd didn't see is a suspend; while idle, the idle stretch
+        // already covers it.
+        if now.saturating_sub(previous) >= MIN_ASLEEP_MS && !self.idle {
+            self.queue(Record::Afk(Afk { start: previous, end: now, reason: AfkReason::Asleep }));
+        }
         let delta = now.saturating_sub(previous).min(MAX_USAGE_STEP_MS);
         if delta == 0 {
             return;
@@ -993,10 +1011,11 @@ impl Engine {
         // (idle, a clamped jump) and counts towards the same habit; anything
         // else ends it.
         let habit = self.counting_habit();
+        let jumped = now.saturating_sub(previous) > MAX_USAGE_STEP_MS;
         let continues = self
             .visit
             .as_ref()
-            .is_some_and(|v| Some(&v.key) == key.as_ref() && v.end == previous && v.habit == habit);
+            .is_some_and(|v| !jumped && Some(&v.key) == key.as_ref() && v.end == previous && v.habit == habit);
         if !continues {
             self.end_visit();
         }
@@ -1126,6 +1145,7 @@ impl Engine {
         self.accrue_usage(now);
         self.fold_usage(now);
         self.end_visit();
+        self.end_afk(now);
     }
 
     /// Whether screen time changed since the last call; the daemon saves for
@@ -1226,6 +1246,40 @@ impl Engine {
         let day = self.day_of(now) - i64::from(offset);
         let (from, to) = (self.day_start_ms(day), self.day_start_ms(day + 1).min(now));
         Breakdown { slices: self.hour_slices(visits, from, to), date: stats::civil_date(day), offset, more_before }
+    }
+
+    /// The visits and time away of one logical day, `offset` days back from
+    /// today, cut to the day and labelled. `visits` and `afk` come from the
+    /// archive, plus the ones in progress.
+    pub fn day_timeline(&self, visits: &[Visit], afk: &[Afk], offset: u32, now: u64, more_before: bool) -> Timeline {
+        let day = self.day_of(now) - i64::from(offset);
+        let (from, to) = (self.day_start_ms(day), self.day_start_ms(day + 1));
+        let visits = visits
+            .iter()
+            .chain(self.visit.as_ref())
+            .filter(|v| v.end > from && v.start < to)
+            .map(|v| {
+                let (start, end) = (v.start.max(from), v.end.min(to));
+                let wall = (v.end - v.start).max(1);
+                TimelineVisit {
+                    key: v.key.clone(),
+                    name: display_key(self.config.app_name(&v.key)).to_string(),
+                    category: self.config.app_category(&v.key).map(str::to_string),
+                    habit: v.habit.as_deref().map(|h| self.config.habit_name(h).to_string()),
+                    start_ms: start,
+                    end_ms: end,
+                    active_ms: v.active_ms * (end - start) / wall,
+                }
+            })
+            .collect();
+        let idle_now = self.afk_since.map(|start| Afk { start, end: now, reason: AfkReason::Idle });
+        let afk = afk
+            .iter()
+            .chain(idle_now.as_ref())
+            .filter(|a| a.end > from && a.start < to)
+            .map(|a| TimelineAfk { start_ms: a.start.max(from), end_ms: a.end.min(to), reason: a.reason })
+            .collect();
+        Timeline { date: stats::civil_date(day), offset, from_ms: from, to_ms: to, more_before, visits, afk }
     }
 
     /// The hours of the whole `app_usage(days)` period.
@@ -1520,6 +1574,15 @@ impl Engine {
         if let Some(visit) = self.visit.take() {
             if visit.active_ms >= MIN_VISIT_MS {
                 self.queue(Record::Visit(visit));
+            }
+        }
+    }
+
+    /// Archives the idle stretch in progress, if any.
+    fn end_afk(&mut self, now: u64) {
+        if let Some(start) = self.afk_since.take() {
+            if now >= start + MIN_VISIT_MS {
+                self.queue(Record::Afk(Afk { start, end: now, reason: AfkReason::Idle }));
             }
         }
     }
@@ -3711,5 +3774,90 @@ mod tests {
         tick_through(&mut e, 1000, 3 * MIN);
         let kitty = e.app_insights(1, &[], 3 * MIN).into_iter().find(|u| u.app == "kitty").unwrap();
         assert_eq!((kitty.sessions_today, kitty.avg_session_ms), (1, 3 * MIN));
+        let timeline = e.day_timeline(&[], &[], 0, 3 * MIN, false);
+        let in_progress = timeline.visits.iter().find(|v| v.key == "kitty").unwrap();
+        assert_eq!((in_progress.start_ms, in_progress.end_ms), (0, 3 * MIN));
+    }
+
+    #[test]
+    fn timelines_label_visits_and_cut_them_to_the_day() {
+        const DAY: u64 = 24 * HOUR;
+        let config = CONFIG.to_string() + "\n[app_categories]\nzathura = \"Reading\"\n";
+        let e = Engine::new(Config::from_toml(&config).unwrap(), State::default());
+        let now = DAY + 12 * HOUR;
+        let visit = |key: &str, start: u64, end: u64, habit: Option<&str>| Visit {
+            key: key.into(),
+            start,
+            end,
+            active_ms: end - start,
+            habit: habit.map(str::to_string),
+        };
+        let visits = [
+            visit("zed", DAY - 30 * MIN, DAY + 30 * MIN, None), // across midnight
+            visit("zathura", DAY + HOUR, DAY + 2 * HOUR, Some("reading")),
+        ];
+        let today = e.day_timeline(&visits, &[], 0, now, true);
+        assert_eq!((today.from_ms, today.to_ms, today.date.as_str()), (DAY, 2 * DAY, "1970-01-02"));
+        let zed = &today.visits[0];
+        assert_eq!((zed.start_ms, zed.end_ms, zed.active_ms), (DAY, DAY + 30 * MIN, 30 * MIN));
+        let zathura = &today.visits[1];
+        assert_eq!((zathura.category.as_deref(), zathura.habit.as_deref()), (Some("Reading"), Some("reading")));
+
+        let yesterday = e.day_timeline(&visits, &[], 1, now, false);
+        assert_eq!(yesterday.visits.len(), 1);
+        assert_eq!(yesterday.visits[0].end_ms, DAY);
+    }
+
+    fn afk_records(e: &mut Engine) -> Vec<Afk> {
+        e.take_archive()
+            .into_iter()
+            .filter_map(|r| match r {
+                Record::Afk(a) => Some(a),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn idle_stretches_are_archived_as_afk() {
+        let mut e = timer_engine();
+        e.handle(Input::FocusChanged(Some(1)), 0);
+        tick_through(&mut e, 1000, MIN);
+        e.handle(Input::Idle(true), MIN);
+        tick_through(&mut e, MIN + 1000, 4 * MIN);
+        assert!(afk_records(&mut e).is_empty(), "still away");
+        // The timeline shows the stretch in progress.
+        let afk = e.day_timeline(&[], &[], 0, 4 * MIN, false).afk;
+        assert_eq!(afk, [TimelineAfk { start_ms: MIN, end_ms: 4 * MIN, reason: AfkReason::Idle }]);
+
+        e.handle(Input::Idle(false), 5 * MIN);
+        assert_eq!(afk_records(&mut e), [Afk { start: MIN, end: 5 * MIN, reason: AfkReason::Idle }]);
+        assert!(e.day_timeline(&[], &[], 0, 5 * MIN, false).afk.is_empty(), "archived, no longer in progress");
+
+        // Shutting down while away closes the stretch.
+        tick_through(&mut e, 5 * MIN + 1000, 6 * MIN);
+        e.handle(Input::Idle(true), 6 * MIN);
+        e.flush_usage(8 * MIN);
+        assert_eq!(afk_records(&mut e), [Afk { start: 6 * MIN, end: 8 * MIN, reason: AfkReason::Idle }]);
+    }
+
+    #[test]
+    fn a_suspend_is_asleep_and_ends_the_visit() {
+        let mut e = timer_engine();
+        e.handle(Input::FocusChanged(Some(1)), 0);
+        tick_through(&mut e, 1000, MIN);
+        e.take_archive();
+        // No ticks for an hour: the machine slept.
+        e.handle(Input::Tick, HOUR + MIN);
+        let records = e.take_archive();
+        assert!(records.contains(&Record::Afk(Afk { start: MIN, end: HOUR + MIN, reason: AfkReason::Asleep })));
+        assert!(
+            records.iter().any(|r| matches!(r, Record::Visit(v) if v.key == "kitty" && v.end == MIN)),
+            "the visit before ends where the sleep began: {records:?}"
+        );
+        // A short stall is neither.
+        tick_through(&mut e, HOUR + MIN + 1000, HOUR + 2 * MIN);
+        e.handle(Input::Tick, HOUR + 2 * MIN + 10_000);
+        assert!(afk_records(&mut e).is_empty());
     }
 }

@@ -443,7 +443,7 @@ impl Daemon {
                 Err(e) => Response::err(e),
             };
         }
-        if let Request::HourStats { day_offset } = request {
+        if let Request::HourStats { day_offset } | Request::Timeline { day_offset } = request {
             let day = engine.day_of(now) - i64::from(day_offset);
             let (from, to) = (engine.day_start_ms(day), engine.day_start_ms(day + 1).min(now));
             let archive = self.archive.as_ref();
@@ -451,6 +451,10 @@ impl Daemon {
             let more_before = archive.and_then(|a| a.first_visit().ok().flatten()).is_some_and(|first| first < from);
             let mut response = Response::ok(None, engine.snapshot(now));
             response.breakdown = Some(engine.day_breakdown(&visits, day_offset, now, more_before));
+            if let Request::Timeline { .. } = request {
+                let afk = archive.and_then(|a| a.afk(from, to).ok()).unwrap_or_default();
+                response.timeline = Some(engine.day_timeline(&visits, &afk, day_offset, now, more_before));
+            }
             return response;
         }
         if let Request::AppStats { days } = request {
@@ -469,6 +473,7 @@ impl Daemon {
             | Request::Events { .. }
             | Request::AppStats { .. }
             | Request::HourStats { .. }
+            | Request::Timeline { .. }
             | Request::ConfigEntries => {
                 Ok((Vec::new(), None))
             }

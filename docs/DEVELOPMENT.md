@@ -68,6 +68,8 @@ crates/
     setup.rs                  `hf setup`: config, systemd unit for the habitd next to hf, native host
     update.rs                 `hf update`: runs the newest release's install.sh for this prefix
     stats_view.rs             day grid and heatmap helpers shared by CLI and TUI
+    web.rs                    `hf web`: HTTP server on 127.0.0.1, read-only API passed through to habitd
+    web/index.html            the insights page (inline CSS/JS/SVG, compiled into hf)
     tui/mod.rs                terminal setup, event loop, snapshot stream, focus reporting
     tui/app.rs                TUI state machine and key handling (no terminal I/O)
     tui/ui.rs                 frame (header, sidebar/tabs, footer) and shared widgets
@@ -281,6 +283,11 @@ carrying the app key so a client can pick one app out of them. `day_breakdown` (
 for `hour_stats`) and `period_breakdown` (with `app_stats`) wrap it — that's what the Insights chart stacks and
 what stepping through days fetches.
 
+**AFK** (`archive::Afk`): `Input::Idle(true)` starts a stretch away (`Engine::afk_since`), `Idle(false)` or
+`flush_usage` (shutdown) archives it with reason `idle`. It starts when idle is reported, so the `idle_timeout`
+before it still counts as screen time and the stretch never overlaps a visit. A jump of at least `MIN_ASLEEP_MS`
+(30 s) between two observations while not idle is a suspend, archived as `asleep`; the jump also ends the visit.
+
 A **visit** is a stretch of focus on one screen-time key: `accrue_usage` extends `Engine::visit` while the same key
 stays focused without a gap, and ends it on a key change (focus, tab), idle or a clamped jump. Visits under
 `MIN_VISIT_MS` (1 s) are dropped. `app_insights(days, visits, now)` merges the archive's visits (plus the one in
@@ -291,7 +298,7 @@ from `state.app_days`, which predates visits.
 habitd side (`habitd/src/archive.rs`): `Archive::open` creates the schema (version in `PRAGMA user_version`; a newer
 version refuses to open) and imports state.json's events and history into a new database. `events(limit)` serves the
 `events` request (state.json's copy is the fallback), `visits(from, to)` the `app_stats` request (insights and the
-hourly breakdown). Schema 2 added the visits' habit column; `migrate` alters the table in place. If the database
+hourly breakdown). Schema 2 added the visits' habit column, schema 3 the `afk` table; `migrate` changes the database in place. If the database
 can't be opened habitd runs without it, logs why, and `app_stats` has no session or hour data.
 
 ### Commitment lock (`lock.rs`)
@@ -348,12 +355,13 @@ JSON lines over a unix socket. Requests are tagged by `cmd` (snake_case):
 | `history {limit}` · `stats {days}` | history entries / daily totals |
 | `events {limit}` · `app_stats {days}` | activity log from the archive (newest first) / screen time, sessions and hours per app |
 | `hour_stats {day_offset}` | the hours of one logical day (0 = today), by habit, category and app |
+| `timeline {day_offset}` | every visit and AFK stretch of one logical day, labelled (`Response.timeline`), plus its hours (`breakdown`) |
 | `lock {until_ms}` · `lock_end` · `lock_cancel_end` | commitment lock |
 | `timer_focus {source, focused?}` | from `hf tui` |
 | `browser_tab {source, window?, title?, url?}` · `browser_hello {source, pid}` | from the native host |
 
 Each request (except `subscribe`) gets one
-`Response { ok, error?, message?, snapshot?, history?, stats?, events?, app_stats? }`.
+`Response { ok, error?, message?, snapshot?, history?, stats?, events?, app_stats?, config?, breakdown?, timeline? }`.
 
 ```sh
 # Talk to the daemon by hand:
@@ -456,6 +464,22 @@ on the socket, keeping partial lines). Shell plugins run it once.
   and screen time when `events_seq` moves, after actions and every 30 s, and runs `FocusReporter`. `FocusState::due` decides when to send `timer_focus`: on every change and
   every 2 s while focused; settings open counts as unfocused. Inside tmux without `focus-events on`, focus reporting
   is disabled and the TUI shows a warning (otherwise the timer would count while the user is elsewhere).
+
+### Web page (`web.rs`, `web/index.html`)
+
+`hf web` is one more client: a `std::net` HTTP server (no dependencies, one thread per connection, GET only,
+`Connection: close`) bound to 127.0.0.1. `/` serves `web/index.html`, compiled in with `include_str!`; `/api/<cmd>`
+maps the query to a `Request` in `api_request` and returns habitd's `Response` as JSON (503 when habitd is
+unreachable). `api_request` is a **whitelist of requests that only read**; that's what keeps the page read-only, so
+never add one that changes state. Requests whose `Host` isn't the page's own address are refused, against DNS
+rebinding.
+
+The page is plain JS without a build step or CDN: it polls `status` every 10 s and refetches the view when
+`events_seq` moves (or every minute for today). Charts are SVG drawn at their measured width (`chart()`); colors
+are a fixed categorical order assigned by use, the rest folded into "Other". The view is in the URL hash
+(`#timeline`, `#screen`, `#habits`, `#log`). The timeline comes from the `timeline` request
+(`Engine::day_timeline`: the archive's visits and AFK stretches plus the ones in progress, cut to the logical day
+and labelled).
 
 ### Native host (`native_host.rs`)
 
