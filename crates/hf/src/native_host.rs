@@ -82,6 +82,12 @@ fn handle(message: &Value, source: &str, out: &Mutex<std::io::Stdout>) -> std::i
                 url: None,
             });
         }
+        Some("media") => {
+            let urls = message.get("urls").and_then(Value::as_array).map_or_else(Vec::new, |urls| {
+                urls.iter().filter_map(Value::as_str).map(String::from).collect()
+            });
+            let _ = habit_ipc::request(&Request::BrowserMedia { source: source.into(), urls });
+        }
         Some("request") => {
             let response = match serde_json::from_value::<Request>(message["request"].clone()) {
                 Ok(request) if allowed_from_browser(&request) => {

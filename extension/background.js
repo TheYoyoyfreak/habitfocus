@@ -2,7 +2,8 @@
 //
 // Talks to habitd through the native messaging host (`hf native-host`):
 //   host -> extension: {type: "snapshot", snapshot} | {type: "disconnected"} | {type: "response", id, response}
-//   extension -> host: {type: "tab", window, title, url} | {type: "window_closed", window} | {type: "request", id, request}
+//   extension -> host: {type: "tab", window, title, url} | {type: "window_closed", window}
+//                      | {type: "media", urls} | {type: "request", id, request}
 //
 // Blocking fails closed: the last known blocked domains stay blocked while the
 // daemon or host is unreachable.
@@ -23,6 +24,7 @@ let daemonConnected = false;
 let snapshot = null;
 let blocked = [];
 let blockedKey = null;
+let mediaKey = null;
 const recentRedirects = new Map();
 let nextRequestId = 1;
 const pendingRequests = new Map();
@@ -122,10 +124,12 @@ function connect() {
       resolve({ ok: false, error: "habitfocus native host is not running" });
     }
     pendingRequests.clear();
+    mediaKey = null;
     broadcast();
     setTimeout(connect, RECONNECT_MS);
   });
   reportAllWindows();
+  reportMedia();
 }
 
 function sendToHost(message) {
@@ -162,12 +166,25 @@ async function reportAllWindows() {
   for (const w of windows) reportWindow(w.id);
 }
 
+// Tabs playing sound, focused or not: a usage unlock keeps running while its
+// video plays in the background or on another monitor without input.
+async function reportMedia() {
+  const tabs = await chrome.tabs.query({ audible: true }).catch(() => []);
+  const urls = tabs.map((tab) => tab.url ?? "").filter(Boolean).sort();
+  const key = urls.join("\n");
+  if (key === mediaKey) return;
+  if (sendToHost({ type: "media", urls })) mediaKey = key;
+}
+
 chrome.tabs.onActivated.addListener(({ windowId }) => reportWindow(windowId));
 chrome.windows.onFocusChanged.addListener((windowId) => {
   if (windowId !== chrome.windows.WINDOW_ID_NONE) reportWindow(windowId);
 });
 chrome.windows.onRemoved.addListener((windowId) => sendToHost({ type: "window_closed", window: windowId }));
-chrome.tabs.onRemoved.addListener((tabId) => recentRedirects.delete(tabId));
+chrome.tabs.onRemoved.addListener((tabId) => {
+  recentRedirects.delete(tabId);
+  reportMedia();
+});
 
 // ---- blocking ---------------------------------------------------------------
 
@@ -184,6 +201,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
     return;
   }
   if (tab.active && (change.url || change.title)) reportWindow(tab.windowId);
+  if ("audible" in change || (change.url && tab.audible)) reportMedia();
 });
 
 // ---- blocked page -----------------------------------------------------------

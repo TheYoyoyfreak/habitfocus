@@ -89,6 +89,9 @@ pub enum Request {
         title: Option<String>,
         url: Option<String>,
     },
+    /// URLs of the tabs playing sound right now, in any window and focused or
+    /// not (browser extension via `hf native-host`). Replaces the last report.
+    BrowserMedia { source: String, urls: Vec<String> },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

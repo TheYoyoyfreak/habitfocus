@@ -505,6 +505,9 @@ impl Daemon {
                 let tab = title.zip(url).map(|(title, url)| BrowserTab { title, url });
                 Ok((engine.handle(Input::BrowserTab { source, window, tab }, now), None))
             }
+            Request::BrowserMedia { source, urls } => {
+                Ok((engine.handle(Input::BrowserMedia { source, urls }, now), None))
+            }
             Request::Lock { until_ms } => {
                 let text = self.config_text.clone();
                 self.engine.lock(until_ms, &text, now).map(|msg| (Vec::new(), Some(msg)))

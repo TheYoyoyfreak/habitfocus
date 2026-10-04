@@ -75,6 +75,12 @@ pub enum Input {
         window: Option<u64>,
         tab: Option<BrowserTab>,
     },
+    /// URLs of the tabs of `source` playing sound, focused or not. Replaces
+    /// the previous report.
+    BrowserMedia {
+        source: String,
+        urls: Vec<String>,
+    },
     /// What's in front in terminal window `window`, found by the daemon: the
     /// program (e.g. "nvim"; `None` when it's only the shell) and the tmux
     /// session shown (`None` outside tmux).
@@ -127,6 +133,8 @@ pub struct Engine {
     schedule_warned: BTreeSet<String>,
     /// Active tab per (extension instance, browser window).
     tabs: BTreeMap<(String, u64), BrowserTab>,
+    /// Tabs playing sound per extension instance: their URLs.
+    media: BTreeMap<String, Vec<String>>,
     /// Program in front per terminal window, e.g. "nvim".
     programs: BTreeMap<u64, String>,
     /// tmux session shown per terminal window.
@@ -186,6 +194,7 @@ impl Engine {
             schedule_seeded: false,
             schedule_warned: BTreeSet::new(),
             tabs: BTreeMap::new(),
+            media: BTreeMap::new(),
             programs: BTreeMap::new(),
             update: None,
             tmux_sessions: BTreeMap::new(),
@@ -334,9 +343,17 @@ impl Engine {
                 }
                 (None, _) => {
                     self.tabs.retain(|(s, _), _| *s != source);
+                    self.media.remove(&source);
                     self.extension_hosts.remove(&source);
                 }
             },
+            Input::BrowserMedia { source, urls } => {
+                if urls.is_empty() {
+                    self.media.remove(&source);
+                } else {
+                    self.media.insert(source, urls);
+                }
+            }
             Input::BrowserHello { source, pid } => {
                 self.extension_hosts.insert(source, (pid, now));
             }
@@ -1019,18 +1036,8 @@ impl Engine {
         if !continues {
             self.end_visit();
         }
-        let Some(key) = key else { return };
-        self.accrue_passive(delta, now);
-        match &mut self.visit {
-            Some(visit) => {
-                visit.end = now;
-                visit.active_ms += delta;
-            }
-            None => {
-                self.visit = Some(Visit { key: key.clone(), start: now - delta, end: now, active_ms: delta, habit })
-            }
-        }
-        *self.app_pending.entry(key).or_default() += delta;
+        // A usage unlock also runs down while its video or music plays
+        // unfocused or without input, so this doesn't depend on `key`.
         let burning: Vec<String> = self
             .state
             .open_unlocks
@@ -1044,6 +1051,18 @@ impl Engine {
                 self.usage_dirty = true;
             }
         }
+        let Some(key) = key else { return };
+        self.accrue_passive(delta, now);
+        match &mut self.visit {
+            Some(visit) => {
+                visit.end = now;
+                visit.active_ms += delta;
+            }
+            None => {
+                self.visit = Some(Visit { key: key.clone(), start: now - delta, end: now, active_ms: delta, habit })
+            }
+        }
+        *self.app_pending.entry(key).or_default() += delta;
     }
 
     /// Adds `delta` of focus to every passive habit the focused window counts
@@ -1114,16 +1133,27 @@ impl Engine {
                 .is_some_and(|host| group.matches_domain(&host))
     }
 
-    /// A usage-based unlock of `group` is being used right now: it's open, one
-    /// of its apps or sites is focused, the group is inside its schedule (off
-    /// hours it's free anyway) and the user isn't idle.
+    /// A tab on one of `group`'s sites plays sound, focused or not.
+    fn playing_in_group(&self, group: &Group) -> bool {
+        self.media
+            .values()
+            .flatten()
+            .filter_map(|url| crate::config::url_host(url))
+            .any(|host| group.matches_domain(&host))
+    }
+
+    /// A usage-based unlock of `group` is being used right now: it's open, the
+    /// group is inside its schedule (off hours it's free anyway), and either
+    /// one of its apps or sites is focused while the user isn't idle, or one
+    /// of its sites plays a video or music (watched in the background, on
+    /// another monitor or without touching the mouse).
     fn usage_burning(&self, group: &str, now: u64) -> bool {
         let Some(unlock) = self.state.open_unlocks.get(group) else { return false };
+        let Some(g) = self.config.groups.get(group) else { return false };
         unlock.mode == UnlockMode::Usage
             && self.is_group_unlocked(group, now)
-            && !self.idle
             && self.is_group_scheduled(group, now)
-            && self.config.groups.get(group).is_some_and(|g| self.focused_in_group(g))
+            && ((!self.idle && self.focused_in_group(g)) || self.playing_in_group(g))
     }
 
     /// Moves pending screen time into the persisted per-day map and prunes
@@ -3341,6 +3371,44 @@ mod tests {
         e.relock("shop", t0 + MIN).unwrap();
         assert_eq!(e.state().credits["shop"], HOUR, "a day pass isn't refunded");
         assert!(e.events(1)[0].text.contains("isn't refunded"));
+    }
+
+    #[test]
+    fn usage_unlocks_run_down_while_their_site_plays_unfocused_or_idle() {
+        let mut e = modes_engine();
+        let t0 = 10 * HOUR;
+        e.state.credits.insert("social".into(), 10 * MIN);
+        e.unlock("social", Some(5 * MIN), t0).unwrap();
+        let media = |urls: &[&str]| Input::BrowserMedia {
+            source: "host".into(),
+            urls: urls.iter().map(|u| u.to_string()).collect(),
+        };
+
+        // A video in the background while working in another app, then
+        // without any input.
+        e.handle(Input::FocusChanged(Some(2)), t0);
+        e.handle(media(&["https://www.youtube.com/watch?v=1"]), t0);
+        tick_collect(&mut e, t0 + 1000, t0 + MIN);
+        assert_eq!(e.state().open_unlocks["social"].usage_left_ms, 4 * MIN);
+        let t1 = t0 + MIN;
+        e.handle(Input::Idle(true), t1);
+        tick_collect(&mut e, t1 + 1000, t1 + MIN);
+        assert_eq!(e.state().open_unlocks["social"].usage_left_ms, 3 * MIN);
+
+        // Sound from other sites doesn't count, nor does a paused video.
+        let t2 = t1 + MIN;
+        e.handle(media(&["https://open.spotify.com/"]), t2);
+        tick_collect(&mut e, t2 + 1000, t2 + MIN);
+        e.handle(media(&[]), t2 + MIN);
+        tick_collect(&mut e, t2 + MIN + 1000, t2 + 2 * MIN);
+        assert_eq!(e.state().open_unlocks["social"].usage_left_ms, 3 * MIN);
+
+        // The browser closing forgets its tabs.
+        let t3 = t2 + 2 * MIN;
+        e.handle(media(&["https://youtube.com/watch?v=2"]), t3);
+        e.handle(Input::BrowserTab { source: "host".into(), window: None, tab: None }, t3);
+        tick_collect(&mut e, t3 + 1000, t3 + MIN);
+        assert_eq!(e.state().open_unlocks["social"].usage_left_ms, 3 * MIN);
     }
 
     #[test]

@@ -103,7 +103,7 @@ flowchart LR
   end
   niri --> loop
   idle --> loop
-  host -- BrowserTab / BrowserHello --> loop
+  host -- BrowserTab / BrowserMedia / BrowserHello --> loop
   tuifocus -- TimerFocus --> loop
   loop -- close/focus window --> niriact[niri msg action / hyprctl dispatch]
   loop -- notify-send --> notif[notifications]
@@ -141,6 +141,7 @@ A typical flow, a user focusing their reading app:
 | `Idle(bool)` | idle thread | no keyboard/mouse input for `idle_timeout` |
 | `TimerFocus { source, focused }` | `hf tui` | terminal focus for timer habits; `None` = client gone |
 | `BrowserTab { source, window?, tab? }` | native host | active tab per browser window; `window: None` = host gone |
+| `BrowserMedia { source, urls }` | native host | URLs of the tabs playing sound, focused or not; replaces the last report |
 | `BrowserHello { source, pid }` | native host | extension alive inside browser process `pid` |
 | `TerminalProgram { window, program?, tmux_session? }` | `terminal.rs` | program in front in a terminal window (`None` = only the shell) and the tmux session it shows |
 | `Tick` | 1 s timer | expire unlocks, penalties, locks, saved progress, credit; schedule windows; browser guard; time accounting |
@@ -230,8 +231,9 @@ Credits (`state.credits`) are banked per group. `unlock` moves credit into `stat
 (`UnlockMode` is ordered `Wallclock < Usage < RestOfDay`; the lock relies on that order):
 
 - **wallclock:** open until `until`.
-- **usage:** `usage_left_ms` is burned by `accrue_usage` only while `usage_burning` (a window or site of the group is
-  focused and the user isn't idle); `until` is the next day start.
+- **usage:** `usage_left_ms` is burned by `accrue_usage` only while `usage_burning`: a window or site of the group is
+  focused and the user isn't idle, or a tab on one of its sites plays sound (`BrowserMedia`; a video in the
+  background, on another monitor or watched without input). `until` is the next day start.
 - **rest_of_day:** costs `rest_of_day_price`, open until the next day start.
 
 `relock` refunds by mode (unused clock time, the usage budget left, nothing for a day pass). Unlocks warn
