@@ -3,8 +3,8 @@
 # Apply changes with `hf reload`.
 
 [general]
-# A running session pauses after this much keyboard/mouse inactivity
-# (idle detection needs a daemon restart to pick up changes).
+# After this much keyboard/mouse inactivity you count as away: app habit
+# sessions pause and the time shows as AFK.
 idle_timeout = "90s"
 # After an emergency abort of a strict session, unlocks are refused this long.
 emergency_penalty = "1h"

@@ -427,8 +427,9 @@ baseline *before* writing, then writes atomically and reloads.
   (using the client's `-L`/`-S`), which also names the session; for tmux in tmux the innermost session wins. Several shells in one terminal process (tabs) are told apart by the window title, then by the
   tty's access time.
 - **Idle (`idle.rs`):** a std thread with its own Wayland connection binds `ext_idle_notifier_v1`; version 2's
-  `get_input_idle_notification` ignores idle inhibitors (a playing video must not count as reading). Changing
-  `idle_timeout` needs a daemon restart.
+  `get_input_idle_notification` ignores idle inhibitors (a playing video must not count as reading). `idle::Watch`
+  creates a new notification (and thread) when `idle_timeout` changes; the old thread ignores its next event and
+  stops.
 - **Server (`server.rs`):** socket mode 0600, refuses to start if another daemon listens.
 - **Heartbeat (`heartbeat.rs`):** `/proc/sys/kernel/random/boot_id`, `clock_gettime(CLOCK_MONOTONIC)` via libc, and
   `systemctl [--user] is-system-running == "stopping"` to recognize logout/shutdown.
@@ -721,7 +722,6 @@ connection state. Send commands by running `hf <subcommand>`. For simple bars, `
 - **Firefox ≥ 155 BiDi** needs `-remote-allow-system-access` to evaluate scripts in extension pages.
 - **Noctalia `runStream`** has no close callback; that's why `hf watch --reconnect` never exits and sends heartbeats.
 - **Double-width characters** (emoji) shift ratatui cells; the TUI avoids them.
-- **`idle_timeout`** only applies after a daemon restart.
 - **Lock and config fields:** a new config field that isn't classified in `weakenings` is a loophole in the
   commitment lock.
 - **Stale binaries:** `cargo test` and `cargo clippy` don't rebuild `target/debug/habitd`; run `cargo build` before

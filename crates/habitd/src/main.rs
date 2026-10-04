@@ -338,11 +338,7 @@ impl Daemon {
         let file = read_config_text(&self.config_path).map_err(|e| format!("{e:#}"))?;
         let (updated, config) = settings::apply(&file, key, value)?;
         self.write_config(updated, config, now)?;
-        let mut message = format!("Set {key} = {value}");
-        if key == "idle_timeout" {
-            message += " (takes effect after `systemctl --user restart habitd`)";
-        }
-        Ok(message)
+        Ok(format!("Set {key} = {value}"))
     }
 
     /// A hint when no screen time was recorded under `key` (ids are exact).
@@ -570,7 +566,6 @@ async fn main() -> anyhow::Result<()> {
     daemon.check_downtime(now);
     daemon.engine.log_startup(now);
     daemon.write_heartbeat(now, false);
-    let idle_timeout = daemon.engine.config().general.idle_timeout;
 
     let (tx, mut rx) = mpsc::channel::<Event>(256);
     let (snapshot_tx, snapshot_rx) = watch::channel(daemon.engine.snapshot(now));
@@ -589,7 +584,8 @@ async fn main() -> anyhow::Result<()> {
              window blocking and focus tracking are disabled"
         ),
     }
-    idle::spawn(tx.clone(), idle_timeout);
+    let mut idle_watch = idle::Watch::default();
+    idle_watch.poll(daemon.engine.config().general.idle_timeout, &tx);
 
     let mut ticker = tokio::time::interval(Duration::from_secs(1));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -653,6 +649,7 @@ async fn main() -> anyhow::Result<()> {
         daemon.write_archive();
         terminal_watch.poll(&daemon.engine, is_tick && ticks.is_multiple_of(TERMINAL_CHECK_EVERY_TICKS), &tx);
         update_checker.poll(daemon.engine.config().general.update_check, &tx);
+        idle_watch.poll(daemon.engine.config().general.idle_timeout, &tx);
 
         let snapshot = daemon.engine.snapshot(now);
         let time_update = is_tick && daemon.engine.is_time_sensitive(now);

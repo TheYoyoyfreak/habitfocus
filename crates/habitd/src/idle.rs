@@ -1,7 +1,12 @@
 //! Idle detection through the `ext-idle-notify-v1` Wayland protocol.
+//!
+//! The compositor watches for input and reports once there was none for the
+//! timeout habitd asked for (`idle_timeout`).
 
 use crate::Event;
 use habit_core::Input;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
 use wayland_client::protocol::{wl_registry, wl_seat};
@@ -13,17 +18,52 @@ use wayland_protocols::ext::idle_notify::v1::client::{
 
 struct IdleState {
     tx: Sender<Event>,
+    /// Generation of the watcher thread that is current.
+    current: Arc<AtomicU64>,
+    /// Generation of this thread.
+    generation: u64,
 }
 
-pub fn spawn(tx: Sender<Event>, timeout_ms: u64) {
-    std::thread::spawn(move || {
-        if let Err(e) = run(tx, timeout_ms) {
-            eprintln!("habitd: idle detection disabled: {e}");
+impl IdleState {
+    fn stale(&self) -> bool {
+        self.current.load(Ordering::Relaxed) != self.generation
+    }
+}
+
+/// Keeps one idle notification with the configured timeout. A timeout only
+/// applies to notifications created with it, so a new one replaces the old
+/// whenever the setting changes.
+#[derive(Default)]
+pub struct Watch {
+    timeout_ms: Option<u64>,
+    current: Arc<AtomicU64>,
+}
+
+impl Watch {
+    /// Starts watching, or watches again when `timeout_ms` changed since the
+    /// last call.
+    pub fn poll(&mut self, timeout_ms: u64, tx: &Sender<Event>) {
+        if self.timeout_ms == Some(timeout_ms) {
+            return;
         }
-    });
+        if self.timeout_ms.is_some() {
+            // The new notification starts counting now and only reports a
+            // return after it reported idle, so start out active.
+            let _ = tx.try_send(Event::Input(Input::Idle(false)));
+        }
+        self.timeout_ms = Some(timeout_ms);
+        // The old thread stops at its next event, which it ignores.
+        let generation = self.current.fetch_add(1, Ordering::Relaxed) + 1;
+        let state = IdleState { tx: tx.clone(), current: self.current.clone(), generation };
+        std::thread::spawn(move || {
+            if let Err(e) = run(state, timeout_ms) {
+                eprintln!("habitd: idle detection disabled: {e}");
+            }
+        });
+    }
 }
 
-fn run(tx: Sender<Event>, timeout_ms: u64) -> anyhow::Result<()> {
+fn run(mut state: IdleState, timeout_ms: u64) -> anyhow::Result<()> {
     let conn = Connection::connect_to_env()?;
     let (globals, mut queue) = registry_queue_init::<IdleState>(&conn)?;
     let qh = queue.handle();
@@ -37,10 +77,9 @@ fn run(tx: Sender<Event>, timeout_ms: u64) -> anyhow::Result<()> {
     } else {
         notifier.get_idle_notification(timeout, &seat, &qh, ())
     };
-    let mut state = IdleState { tx };
     loop {
         queue.blocking_dispatch(&mut state)?;
-        if state.tx.is_closed() {
+        if state.tx.is_closed() || state.stale() {
             return Ok(());
         }
     }
@@ -60,6 +99,9 @@ impl Dispatch<ExtIdleNotificationV1, ()> for IdleState {
             ext_idle_notification_v1::Event::Resumed => false,
             _ => return,
         };
+        if state.stale() {
+            return;
+        }
         let _ = state.tx.blocking_send(Event::Input(Input::Idle(idle)));
     }
 }

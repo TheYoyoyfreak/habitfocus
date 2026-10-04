@@ -81,7 +81,7 @@ pub struct Setting {
 
 pub const SETTINGS: &[Setting] = &[
     Setting { key: "day_start", label: "New day starts at", hint: "HH:MM; saved progress resets then" },
-    Setting { key: "idle_timeout", label: "Pause app habits when idle for", hint: "e.g. 90s, 5m (restart habitd)" },
+    Setting { key: "idle_timeout", label: "Away after no input for", hint: "e.g. 90s, 5m; pauses app habits, shows as AFK" },
     Setting { key: "emergency_penalty", label: "Emergency abort penalty", hint: "e.g. 30m, 1h" },
     Setting { key: "expiry_warning", label: "Warn before relocking", hint: "e.g. 1m" },
     Setting { key: "sound", label: "Sound when a habit is done", hint: "a sound name like complete, a file, or empty" },
