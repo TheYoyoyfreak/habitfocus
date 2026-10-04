@@ -177,7 +177,7 @@ fn draw_settings(frame: &mut Frame, app: &App, index: usize, editing: Option<&st
             _ => Line::from(app.snapshot.as_ref().map(|s| setting_value(s, setting.key)).unwrap_or_default().bold()),
         };
         let marker = if selected { "▌" } else { " " };
-        let mut spans = vec![marker.fg(Color::Cyan), format!(" {:<32}", setting.label).into()];
+        let mut spans = vec![marker.fg(Color::Cyan), format!(" {:<32} ", setting.label).into()];
         spans.extend(value.spans);
         let line = Line::from(spans);
         lines.push(if selected && editing.is_none() { line.add_modifier(Modifier::REVERSED) } else { line });
