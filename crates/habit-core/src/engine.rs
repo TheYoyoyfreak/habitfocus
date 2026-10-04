@@ -312,14 +312,7 @@ impl Engine {
                 self.focused = id;
                 self.enforce_strict(&mut fx);
             }
-            Input::Idle(idle) => {
-                if idle && !self.idle {
-                    self.afk_since = Some(now);
-                } else if !idle {
-                    self.end_afk(now);
-                }
-                self.idle = idle;
-            }
+            Input::Idle(idle) => self.idle = idle,
             Input::TimerFocus { source, focused } => match focused {
                 Some(focused) => {
                     let was_focused = self.timer_clients.get(&source).is_some_and(|(f, _)| *f);
@@ -370,6 +363,7 @@ impl Engine {
         }
         self.update_session(now, &mut fx);
         self.complete_passive(now, &mut fx);
+        self.sync_afk(now);
         fx
     }
 
@@ -1009,23 +1003,44 @@ impl Engine {
         self.state.session.as_ref().filter(|s| s.running_since.is_some()).map(|s| s.habit.clone())
     }
 
-    /// Accrues the time since the last call to the focused window, unless idle.
+    /// Without input, but not away: a habit is counting that keeps counting
+    /// without input (a timer, e.g. reading a paper book next to `hf tui`).
+    fn idle_in_habit(&self) -> bool {
+        self.running_habit().is_some_and(|h| h.kind == HabitKind::Timer) && self.counting_habit().is_some()
+    }
+
+    /// Away from the computer: idle, and no habit is counting through it.
+    fn away(&self) -> bool {
+        self.idle && !self.idle_in_habit()
+    }
+
+    /// Starts or archives the stretch away, after the input or session
+    /// change that started or ended it.
+    fn sync_afk(&mut self, now: u64) {
+        if !self.away() {
+            self.end_afk(now);
+        } else if self.afk_since.is_none() {
+            self.afk_since = Some(now);
+        }
+    }
+
+    /// Accrues the time since the last call to the focused window, unless away.
     fn accrue_usage(&mut self, now: u64) {
         let Some(previous) = self.usage_flushed_at.replace(now) else {
             return;
         };
-        // Time habitd didn't see is a suspend; while idle, the idle stretch
+        // Time habitd didn't see is a suspend; while away, the stretch away
         // already covers it.
-        if now.saturating_sub(previous) >= MIN_ASLEEP_MS && !self.idle {
+        if now.saturating_sub(previous) >= MIN_ASLEEP_MS && self.afk_since.is_none() {
             self.queue(Record::Afk(Afk { start: previous, end: now, reason: AfkReason::Asleep }));
         }
         let delta = now.saturating_sub(previous).min(MAX_USAGE_STEP_MS);
         if delta == 0 {
             return;
         }
-        let key = if self.idle { None } else { self.usage_key() };
+        let key = if self.away() { None } else { self.usage_key() };
         // A visit continues while the same key stays focused without a gap
-        // (idle, a clamped jump) and counts towards the same habit; anything
+        // (away, a clamped jump) and counts towards the same habit; anything
         // else ends it.
         let habit = self.counting_habit();
         let jumped = now.saturating_sub(previous) > MAX_USAGE_STEP_MS;
@@ -3884,6 +3899,27 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_timer_counting_through_idle_is_not_afk() {
+        let mut e = timer_engine();
+        e.handle(Input::FocusChanged(Some(1)), 0);
+        e.start("book", 0).unwrap();
+        heartbeat(&mut e, 0, MIN);
+        e.handle(Input::Idle(true), MIN); // reading: no input
+        heartbeat(&mut e, MIN + 2000, 10 * MIN);
+        let timeline = e.day_timeline(&[], &[], 0, 10 * MIN, false);
+        assert!(timeline.afk.is_empty(), "{:?}", timeline.afk);
+        let reading = &timeline.visits[0];
+        assert_eq!((reading.start_ms, reading.end_ms, reading.habit.as_deref()), (0, 10 * MIN, Some("Book")));
+
+        // Looking away from the timer while still idle is time away again.
+        e.handle(Input::FocusChanged(Some(2)), 10 * MIN);
+        timer_focus(&mut e, false, 10 * MIN);
+        tick_through(&mut e, 10 * MIN + 1000, 12 * MIN);
+        let afk = e.day_timeline(&[], &[], 0, 12 * MIN, false).afk;
+        assert_eq!(afk, [TimelineAfk { start_ms: 10 * MIN, end_ms: 12 * MIN, reason: AfkReason::Idle }]);
     }
 
     #[test]

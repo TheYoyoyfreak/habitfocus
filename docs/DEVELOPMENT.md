@@ -285,8 +285,10 @@ carrying the app key so a client can pick one app out of them. `day_breakdown` (
 for `hour_stats`) and `period_breakdown` (with `app_stats`) wrap it — that's what the Insights chart stacks and
 what stepping through days fetches.
 
-**AFK** (`archive::Afk`): `Input::Idle(true)` starts a stretch away (`Engine::afk_since`), `Idle(false)` or
-`flush_usage` (shutdown) archives it with reason `idle`. It starts when idle is reported, so the `idle_timeout`
+**AFK** (`archive::Afk`): being away (`Engine::away`: idle, unless a timer habit is counting, since reading a paper
+book next to `hf tui` needs no input) starts a stretch (`Engine::afk_since`, synced after every input by
+`sync_afk`); coming back or `flush_usage` (shutdown) archives it with reason `idle`. While a timer counts through
+idle, its visit continues and keeps the habit's label. It starts when idle is reported, so the `idle_timeout`
 before it still counts as screen time and the stretch never overlaps a visit. A jump of at least `MIN_ASLEEP_MS`
 (30 s) between two observations while not idle is a suspend, archived as `asleep`; the jump also ends the visit.
 
