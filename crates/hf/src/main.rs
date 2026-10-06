@@ -54,6 +54,9 @@ enum Command {
         /// Totals per category instead of per app
         #[arg(long)]
         by_category: bool,
+        /// Another synced device (its name) or `all` of them
+        #[arg(long)]
+        device: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -223,10 +226,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 }
             }
         }
-        Command::Apps { days, app, by_category, json } => {
-            let response = call(Request::AppStats { days })?;
+        Command::Apps { days, app, by_category, device, json } => {
+            let device = device.map(|d| device_id(&d)).transpose()?;
+            let response = call(Request::AppStats { days, device })?;
             let (names, categories) =
                 response.snapshot.map(|s| (s.app_names, s.app_categories)).unwrap_or_default();
+            let wall_clock = response.wall_clock;
             let usage = response.app_stats.context("missing app stats")?;
             let rows = stats_view::usage_rows(
                 &usage,
@@ -250,6 +255,13 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 println!("{}", serde_json::to_string_pretty(&rows)?);
             } else {
                 print!("{}", render_apps(&rows, days, app.as_deref(), by_category));
+                if let Some(clock) = wall_clock {
+                    println!(
+                        "\nAt any screen (overlapping devices counted once): {} today, {} in {days} days",
+                        format_duration(clock.today_ms),
+                        format_duration(clock.total_ms)
+                    );
+                }
             }
         }
         Command::Category { app, category } => print_message(call(Request::SetAppCategory { app, category })?),
@@ -520,6 +532,26 @@ fn render_stats(snapshot: &Snapshot, days: &[habit_core::snapshot::DayView]) -> 
         );
     }
     out
+}
+
+/// The id of a synced device by its name (or id), or `all`.
+fn device_id(name: &str) -> anyhow::Result<String> {
+    if name == habit_ipc::ALL_DEVICES {
+        return Ok(name.to_string());
+    }
+    let snapshot = call(Request::Status)?.snapshot.context("missing snapshot")?;
+    let devices = snapshot.sync.map(|s| s.devices).unwrap_or_default();
+    let by_id = name.len() >= 8 && name.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+    let found: Vec<_> = devices.iter().filter(|d| d.name == name || (by_id && d.id.starts_with(name))).collect();
+    match found.as_slice() {
+        [device] => Ok(device.id.clone()),
+        [] if devices.is_empty() => bail!("no other devices: sync isn't set up (see `hf sync`)"),
+        [] => bail!(
+            "no device {name:?}; the others are: {}",
+            devices.iter().map(|d| d.name.as_str()).collect::<Vec<_>>().join(", ")
+        ),
+        _ => bail!("several devices are called {name:?}; use the id from `hf sync status`"),
+    }
 }
 
 fn call(request: Request) -> anyhow::Result<Response> {

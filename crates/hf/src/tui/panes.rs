@@ -483,8 +483,12 @@ pub fn insights(frame: &mut Frame, area: Rect, app: &App, snapshot: &Snapshot) {
         Constraint::Length(7),
         Constraint::Fill(1),
     ]);
-    let title = if app.by_category { "Screen time · by category" } else { "Screen time" };
-    let mut block = pane_block(title);
+    let mut title = if app.by_category { "Screen time · by category".to_string() } else { "Screen time".to_string() };
+    // Which device, once there's more than this one.
+    if super::app::device_views(snapshot).len() > 1 {
+        title += &format!(" · {}", app.device_label());
+    }
+    let mut block = pane_block(&title);
     if app.filtering || !app.insights_filter.is_empty() {
         let mut filter = vec![" filter: ".fg(Color::Cyan), app.insights_filter.clone().bold()];
         if app.filtering {
@@ -552,8 +556,12 @@ pub fn insights(frame: &mut Frame, area: Rect, app: &App, snapshot: &Snapshot) {
         row("credit expired", format_duration(expired)),
         row("windows closed", blocked.to_string()),
         row("screen time", format_duration(screen_total)),
-        Line::from(""),
     ];
+    if let Some(clock) = app.wall_clock {
+        // Summed above; here two devices used at once count once.
+        lines.push(row("at any screen", format_duration(clock.total_ms)));
+    }
+    lines.push(Line::from(""));
     let name_width = snapshot.habits.iter().map(|h| width(&h.name)).max().unwrap_or(0).min(16);
     let last_week = &app.stats[app.stats.len().saturating_sub(7)..];
     for h in &snapshot.habits {

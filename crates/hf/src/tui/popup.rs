@@ -186,12 +186,61 @@ fn draw_settings(frame: &mut Frame, app: &App, index: usize, editing: Option<&st
         }
     }
     lines.push(Line::from(""));
+    lines.extend(sync_lines(app));
+    lines.push(Line::from(""));
     if app.session().is_some_and(|s| s.kind == HabitKind::Timer) {
         lines.push(Line::from(" The timer is paused while settings are open.").fg(Color::Yellow));
     }
     let help = if editing.is_some() { " enter save · esc cancel" } else { " enter edit · j/k move · esc close" };
     lines.push(Line::from(help).fg(Color::DarkGray));
-    render(frame, 56, " Settings ".into(), Color::Cyan, lines);
+    render(frame, SETTINGS_WIDTH, " Settings ".into(), Color::Cyan, lines);
+}
+
+const SETTINGS_WIDTH: u16 = 60;
+
+/// Sync in the settings: how to set it up, or how it goes. Set up with
+/// `hf sync`, since signing in needs a password and the sync key.
+fn sync_lines(app: &App) -> Vec<Line<'static>> {
+    let fit = |text: String| -> String {
+        let max = usize::from(SETTINGS_WIDTH) - 6;
+        if text.chars().count() > max { text.chars().take(max - 1).chain(['…']).collect() } else { text }
+    };
+    let detail = |text: String| Line::from(fit(format!("   {text}"))).fg(Color::DarkGray);
+    let command = |label: &str, command: &str| {
+        Line::from(vec![format!("   {label:<15}").fg(Color::DarkGray), command.to_string().into()])
+    };
+    let Some(sync) = app.snapshot.as_ref().and_then(|s| s.sync.as_ref()) else {
+        return vec![
+            Line::from(vec![" Sync between devices".into(), "  off".fg(Color::DarkGray)]),
+            detail("See the history of all your devices, end-to-end".into()),
+            detail("encrypted, through a sync server you run yourself.".into()),
+            command("first device", "hf sync register <server> <user>"),
+            command("other devices", "hf sync login <server> <user>"),
+            detail("The server, and how to run it:".into()),
+            detail("  github.com/TheYoyoyfreak/habitfocus_sync_server".into()),
+            detail("Setup: README, \"Sync between devices\"".into()),
+        ];
+    };
+    let (status, color) = super::ui::sync_status(sync, super::ui::now_ms());
+    let others = match sync.devices.len() {
+        0 => "no other devices yet".to_string(),
+        _ => sync.devices.iter().map(|d| d.name.as_str()).collect::<Vec<_>>().join(", "),
+    };
+    let mut lines = vec![
+        Line::from(vec![" Sync between devices  ".into(), status.fg(color)]),
+        detail(format!("{} on {}", sync.username, sync.server)),
+        detail(format!("this device: {} · others: {others}", sync.device)),
+    ];
+    if let Some(error) = &sync.error {
+        lines.push(Line::from(fit(format!("   {error}"))).fg(Color::Red));
+    }
+    if sync.signed_out {
+        lines.push(command("sign in again", "hf sync login <server> <user>"));
+    } else {
+        lines.push(command("now / details", "hf sync now · hf sync status"));
+    }
+    lines.push(command("stop", "hf sync logout"));
+    lines
 }
 
 fn draw_lock(frame: &mut Frame, app: &App, input: &str) {

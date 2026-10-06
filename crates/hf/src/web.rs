@@ -128,12 +128,19 @@ fn api_request(cmd: &str, query: &str) -> Option<Request> {
             .unwrap_or(default)
             .min(max)
     };
+    // A device id or `all`; ids are UUIDs, so anything else is ignored.
+    let device = query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| *key == "device")
+        .map(|(_, value)| value.to_string())
+        .filter(|d| !d.is_empty() && d.len() <= 64 && d.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
     Some(match cmd {
         "status" => Request::Status,
         "stats" => Request::Stats { days: param("days", 365, 3660) },
-        "app_stats" => Request::AppStats { days: param("days", 7, 3660) },
-        "hour_stats" => Request::HourStats { day_offset: param("day_offset", 0, 3660) },
-        "timeline" => Request::Timeline { day_offset: param("day_offset", 0, 3660) },
+        "app_stats" => Request::AppStats { days: param("days", 7, 3660), device },
+        "hour_stats" => Request::HourStats { day_offset: param("day_offset", 0, 3660), device },
+        "timeline" => Request::Timeline { day_offset: param("day_offset", 0, 3660), device },
         "events" => Request::Events { limit: param("limit", 1000, 10_000) as usize },
         "history" => Request::History { limit: param("limit", 500, 10_000) as usize },
         _ => return None,
@@ -161,9 +168,14 @@ mod tests {
     #[test]
     fn only_reading_requests_reach_habitd() {
         assert_eq!(api_request("stats", "days=30"), Some(Request::Stats { days: 30 }));
-        assert_eq!(api_request("timeline", "x=1&day_offset=2"), Some(Request::Timeline { day_offset: 2 }));
+        assert_eq!(api_request("timeline", "x=1&day_offset=2"), Some(Request::Timeline { day_offset: 2, device: None }));
+        assert_eq!(
+            api_request("app_stats", "device=all"),
+            Some(Request::AppStats { days: 7, device: Some("all".into()) })
+        );
+        assert_eq!(api_request("app_stats", "device=%27x"), Some(Request::AppStats { days: 7, device: None }));
         assert_eq!(api_request("events", "limit=abc"), Some(Request::Events { limit: 1000 }));
-        assert_eq!(api_request("app_stats", "days=99999"), Some(Request::AppStats { days: 3660 }));
+        assert_eq!(api_request("app_stats", "days=99999"), Some(Request::AppStats { days: 3660, device: None }));
         for cmd in ["start", "unlock", "set_setting", "edit_config", "lock", "subscribe", ""] {
             assert_eq!(api_request(cmd, "habit=read"), None, "{cmd}");
         }

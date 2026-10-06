@@ -69,15 +69,22 @@ fn refresh(app: &mut App) {
             app.stats = stats;
         }
     }
-    if let Ok(response) = habit_ipc::request(&Request::AppStats { days: APP_DAYS }) {
+    let device = app.device.clone();
+    if let Ok(response) = habit_ipc::request(&Request::AppStats { days: APP_DAYS, device: device.clone() }) {
         if let Some(apps) = response.app_stats {
             app.apps = apps;
         }
         if let Some(breakdown) = response.breakdown {
             app.breakdown_period = breakdown;
         }
+        app.wall_clock = response.wall_clock;
     }
-    if let Ok(response) = habit_ipc::request(&Request::HourStats { day_offset: app.chart_day }) {
+    if device.is_some() {
+        if let Ok(response) = habit_ipc::request(&Request::AppStats { days: APP_DAYS, device: None }) {
+            app.local_apps = response.app_stats.unwrap_or_default();
+        }
+    }
+    if let Ok(response) = habit_ipc::request(&Request::HourStats { day_offset: app.chart_day, device }) {
         if let Some(breakdown) = response.breakdown {
             app.breakdown_day = breakdown;
         }

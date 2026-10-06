@@ -3,7 +3,7 @@
 use super::editor::{self, Editor, Section};
 use habit_core::config::Strictness;
 use habit_core::duration::parse_duration;
-use habit_core::snapshot::{AppUsageView, Breakdown, DayView, GroupView, HabitView, SessionView};
+use habit_core::snapshot::{AppUsageView, Breakdown, DayView, GroupView, HabitView, SessionView, WallClock};
 use habit_core::state::Event;
 use habit_core::Snapshot;
 use habit_ipc::{Request, Response};
@@ -114,6 +114,18 @@ pub fn setting_value(snapshot: &Snapshot, key: &str) -> String {
     }
 }
 
+/// What Insights can show, in the order `v` steps through: this device, the
+/// synced devices by name, and all of them. Only this device without sync.
+pub fn device_views(snapshot: &Snapshot) -> Vec<(Option<String>, String)> {
+    let mut views = vec![(None, "this device".to_string())];
+    if let Some(sync) = snapshot.sync.as_ref().filter(|s| !s.devices.is_empty()) {
+        views[0].1 = format!("{} (this device)", sync.device);
+        views.extend(sync.devices.iter().map(|d| (Some(d.id.clone()), d.name.clone())));
+        views.push((Some(habit_ipc::ALL_DEVICES.to_string()), "all devices".to_string()));
+    }
+    views
+}
+
 pub struct Flash {
     pub text: String,
     pub error: bool,
@@ -127,8 +139,17 @@ pub struct App {
     pub stats: Vec<DayView>,
     /// Activity log, newest first.
     pub events: Vec<Event>,
-    /// Screen time over the last week, most used first.
+    /// Screen time over the last week, most used first, of the device(s)
+    /// Insights shows.
     pub apps: Vec<AppUsageView>,
+    /// This device's screen time while Insights shows another device (the
+    /// sidebar and the forms stay about this one).
+    pub local_apps: Vec<AppUsageView>,
+    /// Whose screen time Insights shows: `None` this device, a synced
+    /// device's id, or `ALL_DEVICES`.
+    pub device: Option<String>,
+    /// Time at any screen, while Insights shows all devices.
+    pub wall_clock: Option<WallClock>,
     /// Hours of the chosen day, by habit, category or app.
     pub breakdown_day: Breakdown,
     /// The same over the whole period.
@@ -173,6 +194,9 @@ impl App {
             stats: Vec::new(),
             events: Vec::new(),
             apps: Vec::new(),
+            local_apps: Vec::new(),
+            device: None,
+            wall_clock: None,
             breakdown_day: Breakdown::default(),
             breakdown_period: Breakdown::default(),
             chart_day: 0,
@@ -199,7 +223,13 @@ impl App {
     /// previous one (or it's the first), so the caller should refetch the log,
     /// stats and screen time.
     pub fn set_snapshot(&mut self, snapshot: Snapshot) -> bool {
-        let changed = self.events_seq.replace(snapshot.events_seq) != Some(snapshot.events_seq);
+        let mut changed = self.events_seq.replace(snapshot.events_seq) != Some(snapshot.events_seq);
+        // The device Insights showed was signed out: back to this one.
+        let views = device_views(&snapshot);
+        if self.device.is_some() && !views.iter().any(|(id, _)| *id == self.device) {
+            self.device = None;
+            changed = true;
+        }
         self.habit_index = self.habit_index.min(snapshot.habits.len().saturating_sub(1));
         self.group_index = self.group_index.min(snapshot.groups.len().saturating_sub(1));
 
@@ -285,7 +315,7 @@ impl App {
         let context = editor::Context {
             habits: snapshot.habits.iter().map(|h| (h.id.clone(), h.name.clone())).collect(),
             groups: snapshot.groups.iter().map(|g| (g.id.clone(), g.name.clone())).collect(),
-            recent: self.apps.iter().map(|a| (a.app.clone(), a.total_ms / 7)).collect(),
+            recent: self.this_device_apps().iter().map(|a| (a.app.clone(), a.total_ms / 7)).collect(),
             schedule: id
                 .as_ref()
                 .and_then(|id| snapshot.groups.iter().find(|g| &g.id == id))
@@ -295,6 +325,38 @@ impl App {
             tmux_sessions: Vec::new(),
         };
         self.editor = Some(Editor::new(section, id, table, context));
+    }
+
+    /// This device's screen time, whatever Insights shows.
+    pub fn this_device_apps(&self) -> &[AppUsageView] {
+        if self.device.is_some() {
+            &self.local_apps
+        } else {
+            &self.apps
+        }
+    }
+
+    /// The name of what Insights shows.
+    pub fn device_label(&self) -> String {
+        let views = self.snapshot.as_ref().map(device_views).unwrap_or_default();
+        views
+            .into_iter()
+            .find(|(id, _)| *id == self.device)
+            .map_or_else(|| "this device".to_string(), |(_, name)| name)
+    }
+
+    /// Shows the next device in Insights.
+    fn next_device(&mut self) -> Action {
+        let views = self.snapshot.as_ref().map(device_views).unwrap_or_default();
+        if views.len() < 2 {
+            self.set_flash("Only this device: other devices show up here once they sync (see settings, o)", true);
+            return Action::None;
+        }
+        let at = views.iter().position(|(id, _)| *id == self.device).unwrap_or(0);
+        self.device = views[(at + 1) % views.len()].0.clone();
+        self.app_index = 0;
+        self.set_flash(format!("Insights: {}", self.device_label()), false);
+        Action::Refresh
     }
 
     pub fn session(&self) -> Option<&SessionView> {
@@ -636,6 +698,7 @@ impl App {
         };
         match (key.code, selected) {
             (KeyCode::Char('f' | '/'), _) => self.filtering = true,
+            (KeyCode::Char('v'), _) => return self.next_device(),
             (KeyCode::Char('g'), _) => {
                 self.by_category = !self.by_category;
                 self.app_index = 0;

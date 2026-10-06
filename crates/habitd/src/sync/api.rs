@@ -59,6 +59,8 @@ pub struct RemoteDevice {
 pub enum ApiError {
     /// The session is gone: this device was signed out elsewhere.
     SignedOut,
+    /// No answer: offline, wrong address, or the server is down.
+    Unreachable(String),
     Other(String),
 }
 
@@ -66,7 +68,7 @@ impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ApiError::SignedOut => write!(f, "this device was signed out of the sync account; sign in again with `hf sync login`"),
-            ApiError::Other(e) => write!(f, "{e}"),
+            ApiError::Unreachable(e) | ApiError::Other(e) => write!(f, "{e}"),
         }
     }
 }
@@ -118,6 +120,11 @@ impl Http {
         self.session("POST", "/login", &body)
     }
 
+    /// Whether the server answers.
+    pub fn health(&self) -> Result<(), ApiError> {
+        self.empty("GET", "/healthz", None)
+    }
+
     fn session(&self, method: &str, path: &str, body: &serde_json::Value) -> Result<String, String> {
         let (code, text) = self.call(method, path, Some(&body.to_string())).map_err(|e| e.to_string())?;
         match code {
@@ -146,7 +153,7 @@ impl Http {
         written.map_err(|e| ApiError::Other(format!("curl failed: {e}")))?;
         if !output.status.success() {
             let error = String::from_utf8_lossy(&output.stderr);
-            return Err(ApiError::Other(format!("can't reach the sync server: {}", error.trim())));
+            return Err(ApiError::Unreachable(format!("can't reach the sync server: {}", error.trim())));
         }
         let text = String::from_utf8_lossy(&output.stdout);
         let (body, code) = text.rsplit_once('\n').unwrap_or(("", &text));

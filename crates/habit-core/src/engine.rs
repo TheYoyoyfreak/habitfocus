@@ -6,7 +6,7 @@ use crate::duration::{format_duration, format_duration_config, format_duration_l
 use crate::lock::{Lock, END_DELAY_MS};
 use crate::snapshot::{
     AppUsageView, Breakdown, DayView, GroupView, HabitView, HourSlice, LockView, PauseReason, RequirementView,
-    SessionView, SettingsView, Snapshot, Timeline, TimelineAfk, TimelineVisit, UpdateView,
+    SessionView, SettingsView, Snapshot, SyncView, Timeline, TimelineAfk, TimelineVisit, UpdateView, WallClock,
 };
 use crate::archive::{self, Afk, AfkReason, Record, Visit};
 use crate::stats;
@@ -36,6 +36,24 @@ const HOUR_MS: u64 = 3_600_000;
 /// A screen-time key without its `site:` or `term:` prefix.
 fn display_key(key: &str) -> &str {
     key.strip_prefix("site:").or_else(|| key.strip_prefix(TERMINAL_PREFIX)).unwrap_or(key)
+}
+
+/// Whose visits an Insights view covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageSource {
+    /// This device: totals from its screen-time days, plus the visit in progress.
+    Local,
+    /// Another device (synced): everything from its visits.
+    Remote,
+    /// All devices: everything from their visits, plus the visit in progress.
+    Combined,
+}
+
+impl UsageSource {
+    /// Whether this device's visit in progress belongs to the view.
+    fn current(self) -> bool {
+        self != UsageSource::Remote
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,6 +180,8 @@ pub struct Engine {
     archive: Vec<Record>,
     /// A newer release, as habitd's daily check found (not persisted).
     update: Option<UpdateView>,
+    /// The sync thread's view of the account (not persisted).
+    sync: Option<SyncView>,
     /// Local UTC offset in ms for a given UTC time.
     local_offset: Box<dyn Fn(u64) -> i64 + Send>,
     dirty: bool,
@@ -197,6 +217,7 @@ impl Engine {
             media: BTreeMap::new(),
             programs: BTreeMap::new(),
             update: None,
+            sync: None,
             tmux_sessions: BTreeMap::new(),
             extension_hosts: BTreeMap::new(),
             unverified_browsers: BTreeMap::new(),
@@ -960,6 +981,11 @@ impl Engine {
     }
 
     /// What habitd's release check found: a newer version, or `None`.
+    /// How sync goes, for snapshots; `None` while not signed in.
+    pub fn set_sync(&mut self, sync: Option<SyncView>) {
+        self.sync = sync;
+    }
+
     pub fn set_available_update(&mut self, update: Option<UpdateView>) {
         self.update = update;
     }
@@ -1250,8 +1276,13 @@ impl Engine {
     /// How the hours between `from` and `to` were spent, by habit, category
     /// or app. `visits` come from the archive, plus the one in progress.
     pub fn hour_slices(&self, visits: &[Visit], from: u64, to: u64) -> Vec<HourSlice> {
+        self.hour_slices_for(visits, from, to, UsageSource::Local)
+    }
+
+    fn hour_slices_for(&self, visits: &[Visit], from: u64, to: u64, source: UsageSource) -> Vec<HourSlice> {
+        let current = self.visit.as_ref().filter(|_| source.current());
         let mut hours: BTreeMap<(u8, String), (String, u64, bool)> = BTreeMap::new();
-        for visit in visits.iter().chain(self.visit.as_ref()).filter(|v| v.end > from && v.start < to) {
+        for visit in visits.iter().chain(current).filter(|v| v.end > from && v.start < to) {
             let (label, is_habit) = match &visit.habit {
                 Some(habit) => (self.config.habit_name(habit).to_string(), true),
                 None => match self.config.app_category(&visit.key) {
@@ -1288,20 +1319,46 @@ impl Engine {
 
     /// One logical day of hours, `offset` days back from today.
     pub fn day_breakdown(&self, visits: &[Visit], offset: u32, now: u64, more_before: bool) -> Breakdown {
+        self.day_breakdown_for(visits, offset, now, more_before, UsageSource::Local)
+    }
+
+    pub fn day_breakdown_for(
+        &self,
+        visits: &[Visit],
+        offset: u32,
+        now: u64,
+        more_before: bool,
+        source: UsageSource,
+    ) -> Breakdown {
         let day = self.day_of(now) - i64::from(offset);
         let (from, to) = (self.day_start_ms(day), self.day_start_ms(day + 1).min(now));
-        Breakdown { slices: self.hour_slices(visits, from, to), date: stats::civil_date(day), offset, more_before }
+        let slices = self.hour_slices_for(visits, from, to, source);
+        Breakdown { slices, date: stats::civil_date(day), offset, more_before }
     }
 
     /// The visits and time away of one logical day, `offset` days back from
     /// today, cut to the day and labelled. `visits` and `afk` come from the
     /// archive, plus the ones in progress.
     pub fn day_timeline(&self, visits: &[Visit], afk: &[Afk], offset: u32, now: u64, more_before: bool) -> Timeline {
+        self.day_timeline_for(visits, afk, offset, now, more_before, UsageSource::Local)
+    }
+
+    /// `day_timeline` of another device or of all; `afk` is that device's
+    /// (all devices together have none: away from one isn't away from all).
+    pub fn day_timeline_for(
+        &self,
+        visits: &[Visit],
+        afk: &[Afk],
+        offset: u32,
+        now: u64,
+        more_before: bool,
+        source: UsageSource,
+    ) -> Timeline {
         let day = self.day_of(now) - i64::from(offset);
         let (from, to) = (self.day_start_ms(day), self.day_start_ms(day + 1));
         let visits = visits
             .iter()
-            .chain(self.visit.as_ref())
+            .chain(self.visit.as_ref().filter(|_| source.current()))
             .filter(|v| v.end > from && v.start < to)
             .map(|v| {
                 let (start, end) = (v.start.max(from), v.end.min(to));
@@ -1317,7 +1374,8 @@ impl Engine {
                 }
             })
             .collect();
-        let idle_now = self.afk_since.map(|start| Afk { start, end: now, reason: AfkReason::Idle });
+        let idle_now =
+            self.afk_since.filter(|_| source == UsageSource::Local).map(|start| Afk { start, end: now, reason: AfkReason::Idle });
         let afk = afk
             .iter()
             .chain(idle_now.as_ref())
@@ -1329,9 +1387,13 @@ impl Engine {
 
     /// The hours of the whole `app_usage(days)` period.
     pub fn period_breakdown(&self, visits: &[Visit], days: u32, now: u64) -> Breakdown {
+        self.period_breakdown_for(visits, days, now, UsageSource::Local)
+    }
+
+    pub fn period_breakdown_for(&self, visits: &[Visit], days: u32, now: u64, source: UsageSource) -> Breakdown {
         let from = self.usage_period_start(days, now);
         Breakdown {
-            slices: self.hour_slices(visits, from, now),
+            slices: self.hour_slices_for(visits, from, now, source),
             date: stats::civil_date(self.day_of(now) - i64::from(days.max(1)) + 1),
             offset: 0,
             more_before: false,
@@ -1347,6 +1409,12 @@ impl Engine {
     /// time of day. `visits` come from the archive (oldest first) and cover
     /// the period; the visit in progress is added here.
     pub fn app_insights(&self, days: u32, visits: &[Visit], now: u64) -> Vec<AppUsageView> {
+        self.app_insights_for(days, visits, now, UsageSource::Local)
+    }
+
+    /// `app_insights` of another device or of all. Their totals come from
+    /// visits, since only this device has screen-time days.
+    pub fn app_insights_for(&self, days: u32, visits: &[Visit], now: u64, source: UsageSource) -> Vec<AppUsageView> {
         #[derive(Default)]
         struct Acc {
             sessions: u32,
@@ -1363,8 +1431,9 @@ impl Engine {
         let today = self.day_of(now);
         let first = today - i64::from(days.max(1)) + 1;
         let period = (today - first + 1) as usize;
+        let current = self.visit.as_ref().filter(|_| source.current());
         let mut keys: BTreeMap<&str, Acc> = BTreeMap::new();
-        for visit in visits.iter().chain(self.visit.as_ref()).filter(|v| v.end > from && v.start < now) {
+        for visit in visits.iter().chain(current).filter(|v| v.end > from && v.start < now) {
             let acc = keys.entry(&visit.key).or_default();
             if acc.last_end.is_some_and(|end| visit.start.saturating_sub(end) < SESSION_GAP_MS) {
                 acc.session_ms += visit.active_ms;
@@ -1397,7 +1466,10 @@ impl Engine {
                 t = next;
             }
         }
-        let mut usage = self.app_usage(days, now);
+        let mut usage = match source {
+            UsageSource::Local => self.app_usage(days, now),
+            UsageSource::Remote | UsageSource::Combined => self.visit_usage(days, visits, current, now),
+        };
         for view in &mut usage {
             let Some(acc) = keys.get(view.app.as_str()) else { continue };
             view.sessions = acc.sessions;
@@ -1409,6 +1481,86 @@ impl Engine {
             view.days_sessions = acc.days_sessions.clone();
         }
         usage
+    }
+
+    /// `app_usage` from visits instead of screen-time days: each visit's
+    /// active time spread over the logical days it covers.
+    fn visit_usage(&self, days: u32, visits: &[Visit], current: Option<&Visit>, now: u64) -> Vec<AppUsageView> {
+        let from = self.usage_period_start(days, now);
+        let today = self.day_of(now);
+        let first = today - i64::from(days.max(1)) + 1;
+        let period = (today - first + 1) as usize;
+        let mut totals: BTreeMap<&str, (u64, u64, Vec<u64>)> = BTreeMap::new();
+        for visit in visits.iter().chain(current).filter(|v| v.end > from && v.start < now) {
+            let entry = totals.entry(&visit.key).or_insert_with(|| (0, 0, vec![0; period]));
+            let wall = (visit.end - visit.start).max(1);
+            let mut t = visit.start.max(from);
+            while t < visit.end.min(now) {
+                let day = self.day_of(t);
+                let next = self.day_start_ms(day + 1).min(visit.end).min(now);
+                let share = (next - t) * visit.active_ms / wall;
+                entry.1 += share;
+                entry.2[((day - first) as usize).min(period - 1)] += share;
+                if day == today {
+                    entry.0 += share;
+                }
+                t = next;
+            }
+        }
+        let mut usage: Vec<AppUsageView> = totals
+            .into_iter()
+            .filter(|(_, (_, total, _))| *total > 0)
+            .map(|(app, (today_ms, total_ms, days_ms))| AppUsageView {
+                app: app.to_string(),
+                today_ms,
+                total_ms,
+                sessions: 0,
+                sessions_today: 0,
+                avg_session_ms: 0,
+                longest_session_ms: 0,
+                hours: Vec::new(),
+                hours_today: Vec::new(),
+                days_ms,
+                days_sessions: Vec::new(),
+            })
+            .collect();
+        usage.sort_by(|a, b| b.total_ms.cmp(&a.total_ms).then_with(|| a.app.cmp(&b.app)));
+        usage
+    }
+
+    /// Time at any screen over the period and today: the union of all
+    /// visits, so overlapping use of two devices counts once. Wall time, not
+    /// active time, since the devices' idle stretches can't be lined up.
+    pub fn wall_clock(&self, days: u32, visits: &[Visit], now: u64) -> WallClock {
+        let from = self.usage_period_start(days, now);
+        let today_start = self.day_start_ms(self.day_of(now));
+        let mut spans: Vec<(u64, u64)> = visits
+            .iter()
+            .chain(self.visit.as_ref())
+            .map(|v| (v.start.max(from), v.end.min(now)))
+            .filter(|(start, end)| start < end)
+            .collect();
+        spans.sort_unstable();
+        let mut clock = WallClock::default();
+        let mut add = |(start, end): (u64, u64)| {
+            clock.total_ms += end - start;
+            clock.today_ms += end.saturating_sub(start.max(today_start));
+        };
+        let mut merged: Option<(u64, u64)> = None;
+        for (start, end) in spans {
+            match &mut merged {
+                Some((_, last_end)) if start <= *last_end => *last_end = (*last_end).max(end),
+                _ => {
+                    if let Some(done) = merged.replace((start, end)) {
+                        add(done);
+                    }
+                }
+            }
+        }
+        if let Some(done) = merged {
+            add(done);
+        }
+        clock
     }
 
     /// Records that the daemon started (the first line of the activity log
@@ -1575,6 +1727,7 @@ impl Engine {
             app_names: self.app_names_view(),
             app_categories: self.app_categories_view(),
             update: self.update.clone().filter(|_| self.config.general.update_check),
+            sync: self.sync.clone(),
             settings: SettingsView {
                 sound: self.config.general.sound.clone(),
                 day_start: format_time_of_day(self.config.general.day_start),
@@ -3860,6 +4013,67 @@ mod tests {
         let timeline = e.day_timeline(&[], &[], 0, 3 * MIN, false);
         let in_progress = timeline.visits.iter().find(|v| v.key == "kitty").unwrap();
         assert_eq!((in_progress.start_ms, in_progress.end_ms), (0, 3 * MIN));
+    }
+
+    #[test]
+    fn other_devices_insights_come_from_their_visits_alone() {
+        const DAY: u64 = 24 * HOUR;
+        let mut e = timer_engine();
+        let today = e.day_start_ms(e.day_of(DAY + 12 * HOUR));
+        // This device: kitty in progress, plus screen-time days the other
+        // devices don't have.
+        let day = e.day_of(today);
+        stats::record_app(&mut e.state.app_days, day, "zed", 99 * MIN);
+        e.handle(Input::FocusChanged(Some(1)), today + HOUR);
+        tick_through(&mut e, today + HOUR + 1000, today + HOUR + 3 * MIN);
+        let now = today + HOUR + 3 * MIN;
+        let visit = |key: &str, start: u64, minutes: u64| Visit {
+            key: key.into(),
+            start,
+            end: start + minutes * MIN,
+            active_ms: minutes * MIN,
+            habit: None,
+        };
+        // The laptop's: one across the day start, one 30 s after it.
+        let laptop = [visit("firefox", today - 10 * MIN, 20), visit("firefox", today + 10 * MIN + 30_000, 1)];
+
+        let remote = e.app_insights_for(2, &laptop, now, UsageSource::Remote);
+        assert_eq!(remote.iter().map(|u| u.app.as_str()).collect::<Vec<_>>(), ["firefox"], "no zed, no kitty");
+        let firefox = &remote[0];
+        assert_eq!((firefox.today_ms, firefox.total_ms), (11 * MIN, 21 * MIN));
+        assert_eq!(firefox.days_ms, [10 * MIN, 11 * MIN], "split at the day start");
+        assert_eq!(firefox.sessions, 1, "a minute apart: one session");
+
+        let combined = e.app_insights_for(2, &laptop, now, UsageSource::Combined);
+        let total = |usage: &[AppUsageView], app: &str| usage.iter().find(|u| u.app == app).map(|u| u.total_ms);
+        assert_eq!(total(&combined, "kitty"), Some(3 * MIN), "with the visit in progress");
+        assert_eq!(total(&combined, "zed"), None, "screen-time days aren't per device");
+
+        let timeline = e.day_timeline_for(&laptop, &[], 0, now, false, UsageSource::Remote);
+        assert!(timeline.visits.iter().all(|v| v.key == "firefox"));
+        let breakdown = e.day_breakdown_for(&laptop, 0, now, false, UsageSource::Remote);
+        assert_eq!(breakdown.slices.iter().map(|s| s.ms).sum::<u64>(), 11 * MIN);
+        let period = e.period_breakdown_for(&laptop, 2, now, UsageSource::Combined);
+        assert_eq!(period.slices.iter().map(|s| s.ms).sum::<u64>(), 24 * MIN);
+    }
+
+    #[test]
+    fn wall_clock_counts_overlapping_devices_once() {
+        const DAY: u64 = 24 * HOUR;
+        let e = engine();
+        let now = DAY + 12 * HOUR;
+        let visit = |start: u64, end: u64| Visit { key: "x".into(), start, end, active_ms: end - start, habit: None };
+        let visits = [
+            visit(DAY - HOUR, DAY + HOUR),          // laptop, across the day start
+            visit(DAY + 30 * MIN, DAY + 2 * HOUR),  // phone, overlapping
+            visit(DAY + 3 * HOUR, DAY + 4 * HOUR),  // apart
+            visit(DAY + 3 * HOUR, DAY + 3 * HOUR + MIN), // inside the one before
+            visit(DAY + 11 * HOUR, DAY + 13 * HOUR), // runs past now
+        ];
+        let clock = e.wall_clock(2, &visits, now);
+        assert_eq!(clock.total_ms, HOUR + 2 * HOUR + HOUR + HOUR);
+        assert_eq!(clock.today_ms, 2 * HOUR + HOUR + HOUR);
+        assert_eq!(e.wall_clock(1, &[], now), WallClock::default());
     }
 
     #[test]

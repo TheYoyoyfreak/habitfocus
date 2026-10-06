@@ -372,6 +372,7 @@ JSON lines over a unix socket. Requests are tagged by `cmd` (snake_case):
 | `history {limit}` · `stats {days}` | history entries / daily totals |
 | `events {limit}` · `app_stats {days}` | activity log from the archive (newest first) / screen time, sessions and hours per app |
 | `hour_stats {day_offset}` | the hours of one logical day (0 = today), by habit, category and app |
+| … `device` | on `app_stats`, `hour_stats`, `timeline`: a synced device's id or `all` (absent: this device) |
 | `timeline {day_offset}` | every visit and AFK stretch of one logical day, labelled (`Response.timeline`), plus its hours (`breakdown`) |
 | `lock {until_ms}` · `lock_end` · `lock_cancel_end` | commitment lock |
 | `timer_focus {source, focused?}` | from `hf tui` |
@@ -475,7 +476,26 @@ of Atuin's. It is opt-in: nothing happens until `hf sync register` or `hf sync l
 - **Forward compatibility:** rows that don't parse (an event kind from a newer habitfocus) are skipped; tables this
   version doesn't know are left on the server.
 
-Pulled rows are stored but not shown yet: every view reads this device's rows only.
+- **Status:** the thread sends `Event::SyncChanged(Option<SyncView>)` to the event loop whenever something changes
+  (sign in or out, a sync starting or ending, the server going away or coming back); `Engine::set_sync` puts it in
+  snapshots as `snapshot.sync`, `None` while not signed in. Between syncs it asks `GET /healthz` every minute;
+  `reachable` is false after a request that got no answer (`ApiError::Unreachable`).
+
+**Views across devices.** `app_stats`, `hour_stats` and `timeline` take an optional `device`: absent (or this
+device's id) is this device as before, `"all"` (`habit_ipc::ALL_DEVICES`) every device, any other id that device.
+habitd turns it into `archive::Devices` for the queries (`visits_of`, `afk_of`, `first_visit_of`) and a
+`UsageSource` for the engine's `*_for` functions:
+
+- `Local`: totals from `state.app_days`, plus the visit in progress (unchanged).
+- `Remote`: everything from that device's visits (`Engine::visit_usage` spreads each visit's active time over the
+  logical days it covers, by this device's `day_start`); no visit in progress, its own AFK.
+- `Combined`: everything from all devices' visits plus the visit in progress, and `Response.wall_clock`
+  (`Engine::wall_clock`): the union of all visits' wall time, so overlapping devices count once. The timeline has
+  no AFK here (away from one device isn't away from all).
+
+The visits of other devices only exist since they started syncing; this device's screen-time days go further back
+than its visits, so "this device" and "all devices" can differ before that. Habits, streaks and the log are still
+this device's.
 
 ## hf: CLI, TUI and native host
 

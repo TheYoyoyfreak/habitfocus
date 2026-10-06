@@ -41,6 +41,48 @@ pub struct Snapshot {
     /// A newer release is out (`general.update_check`).
     #[serde(default)]
     pub update: Option<UpdateView>,
+    /// Multi-device sync, while this device is signed in to a sync server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<SyncView>,
+}
+
+/// The sync account and how syncing goes, from habitd's sync thread.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncView {
+    pub server: String,
+    pub username: String,
+    /// This device's name.
+    pub device: String,
+    /// The last check reached the server; `None` before the first one.
+    pub reachable: Option<bool>,
+    /// A sync is running.
+    pub syncing: bool,
+    /// When the last sync succeeded (unix ms).
+    pub last_sync_ms: Option<u64>,
+    /// Why the last sync failed, when it did.
+    pub error: Option<String>,
+    /// The server ended this device's session: it syncs no more until signed in again.
+    pub signed_out: bool,
+    /// The other devices of the account, by name.
+    pub devices: Vec<SyncDeviceView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncDeviceView {
+    pub id: String,
+    pub name: String,
+    pub last_seen_ms: Option<u64>,
+    /// Archive rows pulled from it.
+    pub rows: u64,
+}
+
+/// Screen time across devices counted once: time spent at any screen (the
+/// union of all visits), next to the summed time of the Insights rows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WallClock {
+    pub today_ms: u64,
+    /// Over the requested period, today included.
+    pub total_ms: u64,
 }
 
 /// A release newer than the running habitd.

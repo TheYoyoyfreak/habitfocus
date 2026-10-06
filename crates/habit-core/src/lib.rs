@@ -11,7 +11,7 @@ pub mod state;
 pub mod stats;
 
 pub use config::Config;
-pub use engine::{BrowserTab, Effect, Engine, Input, WindowInfo};
+pub use engine::{BrowserTab, Effect, Engine, Input, UsageSource, WindowInfo};
 pub use snapshot::Snapshot;
 pub use state::State;
 

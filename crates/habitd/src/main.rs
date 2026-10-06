@@ -15,7 +15,7 @@ mod update;
 use anyhow::Context;
 use habit_core::duration::{format_duration, format_duration_long};
 use habit_core::lock::{resolve_locked, unexplained_downtime, weakenings};
-use habit_core::{BrowserTab, Config, Effect, Engine, Input, Snapshot, State};
+use habit_core::{BrowserTab, Config, Effect, Engine, Input, Snapshot, State, UsageSource};
 use habit_ipc::{Request, Response};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -27,6 +27,8 @@ pub enum Event {
     Request(Request, oneshot::Sender<Response>),
     /// The answer of the daily release check.
     UpdateChecked(Result<Option<habit_ipc::update::Release>, String>),
+    /// How sync goes (`None`: not signed in).
+    SyncChanged(Option<habit_core::snapshot::SyncView>),
 }
 
 /// The compositor whose windows are tracked and closed or focused.
@@ -87,6 +89,18 @@ fn local_offset_ms(utc_ms: u64) -> i64 {
         .timestamp_millis_opt(utc_ms as i64)
         .single()
         .map_or(0, |t| t.offset().fix().local_minus_utc() as i64 * 1000)
+}
+
+/// Whose statistics a request's `device` asks for: none or this device's id
+/// is this device, `all` every device, anything else that device.
+fn view_of(archive: Option<&archive::Archive>, device: Option<&str>) -> (archive::Devices, UsageSource) {
+    let this = archive.map(|a| a.device().id.as_str());
+    match device.filter(|d| !d.is_empty()) {
+        None => (archive::Devices::This, UsageSource::Local),
+        Some(id) if Some(id) == this => (archive::Devices::This, UsageSource::Local),
+        Some(habit_ipc::ALL_DEVICES) => (archive::Devices::All, UsageSource::Combined),
+        Some(id) => (archive::Devices::One(id.to_string()), UsageSource::Remote),
+    }
 }
 
 fn now_ms() -> u64 {
@@ -440,27 +454,39 @@ impl Daemon {
                 Err(e) => Response::err(e),
             };
         }
-        if let Request::HourStats { day_offset } | Request::Timeline { day_offset } = request {
+        if let Request::HourStats { day_offset, device } | Request::Timeline { day_offset, device } = &request {
+            let day_offset = *day_offset;
+            let (devices, source) = view_of(self.archive.as_ref(), device.as_deref());
             let day = engine.day_of(now) - i64::from(day_offset);
             let (from, to) = (engine.day_start_ms(day), engine.day_start_ms(day + 1).min(now));
             let archive = self.archive.as_ref();
-            let visits = archive.and_then(|a| a.visits(from, to).ok()).unwrap_or_default();
-            let more_before = archive.and_then(|a| a.first_visit().ok().flatten()).is_some_and(|first| first < from);
+            let visits = archive.and_then(|a| a.visits_of(&devices, from, to).ok()).unwrap_or_default();
+            let more_before =
+                archive.and_then(|a| a.first_visit_of(&devices).ok().flatten()).is_some_and(|first| first < from);
             let mut response = Response::ok(None, engine.snapshot(now));
-            response.breakdown = Some(engine.day_breakdown(&visits, day_offset, now, more_before));
+            response.breakdown = Some(engine.day_breakdown_for(&visits, day_offset, now, more_before, source));
             if let Request::Timeline { .. } = request {
-                let afk = archive.and_then(|a| a.afk(from, to).ok()).unwrap_or_default();
-                response.timeline = Some(engine.day_timeline(&visits, &afk, day_offset, now, more_before));
+                // Away from one device isn't away from all of them.
+                let afk = match devices {
+                    archive::Devices::All => Vec::new(),
+                    _ => archive.and_then(|a| a.afk_of(&devices, from, to).ok()).unwrap_or_default(),
+                };
+                response.timeline =
+                    Some(engine.day_timeline_for(&visits, &afk, day_offset, now, more_before, source));
             }
             return response;
         }
-        if let Request::AppStats { days } = request {
-            let days = days.min(3660);
+        if let Request::AppStats { days, device } = &request {
+            let days = (*days).min(3660);
+            let (devices, source) = view_of(self.archive.as_ref(), device.as_deref());
             let mut response = Response::ok(None, engine.snapshot(now));
             let from = engine.usage_period_start(days, now);
-            let visits = self.archive.as_ref().and_then(|a| a.visits(from, now).ok()).unwrap_or_default();
-            response.breakdown = Some(engine.period_breakdown(&visits, days, now));
-            response.app_stats = Some(engine.app_insights(days, &visits, now));
+            let visits = self.archive.as_ref().and_then(|a| a.visits_of(&devices, from, now).ok()).unwrap_or_default();
+            response.breakdown = Some(engine.period_breakdown_for(&visits, days, now, source));
+            response.app_stats = Some(engine.app_insights_for(days, &visits, now, source));
+            if source == UsageSource::Combined {
+                response.wall_clock = Some(engine.wall_clock(days, &visits, now));
+            }
             return response;
         }
         let result: Result<(Vec<Effect>, Option<String>), String> = match request {
@@ -604,7 +630,7 @@ async fn main() -> anyhow::Result<()> {
     // Sync reads and writes history.db through a connection of its own.
     let sync = daemon.archive.is_some().then(|| {
         let archive_path = habit_ipc::archive_path_for(&daemon.state_path);
-        sync::spawn(archive_path, daemon.state_path.with_file_name("sync.json"))
+        sync::spawn(archive_path, daemon.state_path.with_file_name("sync.json"), tx.clone())
     });
 
     eprintln!("habitd: listening on {}", socket_path.display());
@@ -640,6 +666,7 @@ async fn main() -> anyhow::Result<()> {
                     Event::Request(request, reply) => {
                         let _ = reply.send(daemon.handle_request(request, now));
                     }
+                    Event::SyncChanged(view) => daemon.engine.set_sync(view),
                     Event::UpdateChecked(result) => {
                         if let Some(update) = update_checker.finished(result) {
                             daemon.engine.set_available_update(update);

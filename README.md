@@ -299,8 +299,13 @@ hf sync now                                         # sync right away (otherwise
 hf sync logout
 ```
 
-Keep the sync key safe: without it, nobody (you included) can read the data on the server. For now the other
-devices' history is only collected; the views still show this device alone.
+Keep the sync key safe: without it, nobody (you included) can read the data on the server.
+
+Once other devices have synced, the TUI shows how sync goes in its header and sidebar, and `v` in Insights steps
+through the devices: this one, each other device, and **all devices**. All devices adds the time *at any screen*:
+two devices used at the same time count once there, while the table sums them. On the command line, `hf apps
+--device <name>` or `--device all` does the same. Habits and streaks still count this device only. Without sync
+nothing of this shows; the settings (`o`) explain how to set it up.
 
 ### The sound when a habit is done
 

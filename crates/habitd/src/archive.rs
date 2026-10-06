@@ -129,6 +129,29 @@ impl Table {
     }
 }
 
+/// Whose rows a query reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Devices {
+    /// This device (the rows with `device` NULL).
+    This,
+    /// Another device, pulled by sync.
+    One(String),
+    /// Every device.
+    All,
+}
+
+impl Devices {
+    /// The value queries compare `device` with: `device IS ?` matches NULL for
+    /// this device, and `'*'` stands for every device.
+    fn param(&self) -> Option<&str> {
+        match self {
+            Devices::This => None,
+            Devices::One(id) => Some(id),
+            Devices::All => Some("*"),
+        }
+    }
+}
+
 /// Another device of the sync account.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteDevice {
@@ -217,13 +240,18 @@ impl Archive {
         Ok(events)
     }
 
-    /// Visits that overlap `from..to`, oldest first.
+    #[cfg(test)]
     pub fn visits(&self, from: u64, to: u64) -> anyhow::Result<Vec<Visit>> {
+        self.visits_of(&Devices::This, from, to)
+    }
+
+    /// Visits of `devices` that overlap `from..to`, oldest first.
+    pub fn visits_of(&self, devices: &Devices, from: u64, to: u64) -> anyhow::Result<Vec<Visit>> {
         let mut stmt = self.conn.prepare(
             "SELECT key, start_ms, end_ms, active_ms, habit FROM visits
-             WHERE device IS NULL AND end_ms > ?1 AND start_ms < ?2 ORDER BY start_ms, id",
+             WHERE (device IS ?3 OR ?3 = '*') AND end_ms > ?1 AND start_ms < ?2 ORDER BY start_ms, id",
         )?;
-        let rows = stmt.query_map(params![from as i64, to as i64], |row| {
+        let rows = stmt.query_map(params![from as i64, to as i64, devices.param()], |row| {
             Ok(Visit {
                 key: row.get(0)?,
                 start: row.get::<_, i64>(1)? as u64,
@@ -385,14 +413,19 @@ impl Archive {
 }
 
 impl Archive {
-    /// Time away overlapping `from`..`to`, oldest first. Reasons this habitd
-    /// doesn't know are skipped.
+    #[cfg(test)]
     pub fn afk(&self, from: u64, to: u64) -> anyhow::Result<Vec<Afk>> {
+        self.afk_of(&Devices::This, from, to)
+    }
+
+    /// Time away of `devices` overlapping `from`..`to`, oldest first. Reasons
+    /// this habitd doesn't know are skipped.
+    pub fn afk_of(&self, devices: &Devices, from: u64, to: u64) -> anyhow::Result<Vec<Afk>> {
         let mut stmt = self.conn.prepare(
             "SELECT start_ms, end_ms, reason FROM afk
-             WHERE device IS NULL AND end_ms > ?1 AND start_ms < ?2 ORDER BY start_ms, id",
+             WHERE (device IS ?3 OR ?3 = '*') AND end_ms > ?1 AND start_ms < ?2 ORDER BY start_ms, id",
         )?;
-        let rows = stmt.query_map(params![from as i64, to as i64], |row| {
+        let rows = stmt.query_map(params![from as i64, to as i64, devices.param()], |row| {
             Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64, row.get::<_, String>(2)?))
         })?;
         let mut afk = Vec::new();
@@ -405,10 +438,18 @@ impl Archive {
         Ok(afk)
     }
 
-    /// When the first visit was recorded, if any.
+    #[cfg(test)]
     pub fn first_visit(&self) -> anyhow::Result<Option<u64>> {
-        let first: Option<i64> =
-            self.conn.query_row("SELECT MIN(start_ms) FROM visits WHERE device IS NULL", [], |row| row.get(0))?;
+        self.first_visit_of(&Devices::This)
+    }
+
+    /// When the first visit of `devices` was recorded, if any.
+    pub fn first_visit_of(&self, devices: &Devices) -> anyhow::Result<Option<u64>> {
+        let first: Option<i64> = self.conn.query_row(
+            "SELECT MIN(start_ms) FROM visits WHERE device IS ?1 OR ?1 = '*'",
+            params![devices.param()],
+            |row| row.get(0),
+        )?;
         Ok(first.map(|ms| ms as u64))
     }
 }
@@ -703,6 +744,29 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM visits WHERE device = ?1", params![laptop], |r| r.get(0))
             .unwrap();
         assert_eq!(stored, 1);
+    }
+
+    #[test]
+    fn queries_read_one_device_or_all() {
+        let mut archive = Archive::in_memory(&State::default());
+        archive.write(&[Record::Visit(Visit { key: "kitty".into(), start: 50, end: 60, active_ms: 10, habit: None })]).unwrap();
+        archive.write(&[Record::Afk(Afk { start: 70, end: 80, reason: AfkReason::Idle })]).unwrap();
+        let laptop = "0199b4c1-0000-7000-8000-000000000001";
+        let rows: Vec<(String, Record)> =
+            one_of_each(0).into_iter().enumerate().map(|(i, r)| (format!("{laptop}:x:{i}"), r)).collect();
+        archive.insert_remote(laptop, &rows).unwrap();
+
+        let keys = |devices: &Devices| -> Vec<String> {
+            archive.visits_of(devices, 0, 1000).unwrap().into_iter().map(|v| v.key).collect()
+        };
+        assert_eq!(keys(&Devices::This), ["kitty"]);
+        assert_eq!(keys(&Devices::One(laptop.into())), ["site:example.org"]);
+        assert_eq!(keys(&Devices::All), ["site:example.org", "kitty"], "oldest first");
+        assert!(keys(&Devices::One("unknown".into())).is_empty());
+        assert_eq!(archive.afk_of(&Devices::One(laptop.into()), 0, 1000).unwrap().len(), 1);
+        assert_eq!(archive.afk_of(&Devices::All, 0, 1000).unwrap().len(), 2);
+        assert_eq!(archive.first_visit_of(&Devices::This).unwrap(), Some(50));
+        assert_eq!(archive.first_visit_of(&Devices::All).unwrap(), Some(0));
     }
 
     #[test]

@@ -5,7 +5,7 @@ use super::app::{App, Pane};
 use super::{form, panes, popup};
 use habit_core::config::{HabitKind, Strictness};
 use habit_core::duration::{format_duration, format_duration_long};
-use habit_core::snapshot::{GroupView, HabitView, PauseReason, SessionView};
+use habit_core::snapshot::{GroupView, HabitView, PauseReason, SessionView, SyncView};
 use habit_core::Snapshot;
 use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -71,6 +71,10 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(update) = app.snapshot.as_ref().and_then(|s| s.update.as_ref()) {
         spans.push(format!("↑ {} available · hf update   ", update.version).fg(Color::Yellow));
     }
+    if let Some(sync) = app.snapshot.as_ref().and_then(|s| s.sync.as_ref()) {
+        let (text, color) = sync_status(sync, now_ms());
+        spans.push(format!("⇅ {text}   ").fg(color));
+    }
     spans.push(if app.connected {
         "● connected ".fg(Color::Green)
     } else {
@@ -101,12 +105,29 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
         }
         let streak = crate::stats_view::streak_label(snapshot.streak_days);
         lines.push(row("streak", streak, if snapshot.streak_days > 0 { Color::Yellow } else { Color::DarkGray }));
-        let screen: u64 = app.apps.iter().map(|a| a.today_ms).sum();
+        let screen: u64 = app.this_device_apps().iter().map(|a| a.today_ms).sum();
         lines.push(row("screen time", format_duration(screen), Color::Reset));
         let blocking = snapshot.groups.iter().filter(|g| g.blocked).count();
         lines.push(row("blocking", format!("{blocking} of {}", snapshot.groups.len()), Color::Reset));
         if snapshot.penalty_remaining_ms > 0 {
             lines.push(row("penalty", format_duration(snapshot.penalty_remaining_ms), Color::Red));
+        }
+        if let Some(sync) = &snapshot.sync {
+            lines.push(Line::from(""));
+            lines.push(Line::from(" SYNC").fg(Color::DarkGray));
+            // The sidebar is narrow: "synced" | "3 min ago".
+            let (status, color) = sync_status(sync, now_ms());
+            let (label, value) = match status.strip_prefix("synced ") {
+                Some(ago) => ("synced", ago.to_string()),
+                None => ("status", status.replace("server unreachable", "unreachable")),
+            };
+            lines.push(row(label, value, color));
+            let others = match sync.devices.len() {
+                0 => "none yet".to_string(),
+                1 => sync.devices[0].name.clone(),
+                n => format!("{n} devices"),
+            };
+            lines.push(row("others", others, Color::Reset));
         }
     }
     let block = Block::new().borders(Borders::RIGHT).border_style(Color::DarkGray);
@@ -171,22 +192,18 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
             ("n", "new"),
             ("D", "delete"),
         ],
-        Pane::Insights if app.by_category => vec![
-            ("j/k", "choose"),
-            ("f", "filter"),
-            ("g", "by app"),
-            ("[/]", "day"),
-            ("d", if app.chart_period { "day" } else { "7 days" }),
-        ],
-        Pane::Insights => vec![
-            ("j/k", "choose"),
-            ("f", "filter"),
-            ("g", "by category"),
-            ("c", "category"),
-            ("r", "rename"),
-            ("[/]", "day"),
-            ("d", if app.chart_period { "day" } else { "7 days" }),
-        ],
+        Pane::Insights => {
+            let mut keys = if app.by_category {
+                vec![("j/k", "choose"), ("f", "filter"), ("g", "by app")]
+            } else {
+                vec![("j/k", "choose"), ("f", "filter"), ("g", "by category"), ("c", "category"), ("r", "rename")]
+            };
+            keys.extend([("[/]", "day"), ("d", if app.chart_period { "day" } else { "7 days" })]);
+            if app.snapshot.as_ref().is_some_and(|s| super::app::device_views(s).len() > 1) {
+                keys.push(("v", "device"));
+            }
+            keys
+        }
         Pane::Lock => match app.snapshot.as_ref().and_then(|s| s.lock.as_ref()) {
             Some(lock) if lock.end_requested => vec![("enter", "extend"), ("e", "cancel early end")],
             Some(_) => vec![("enter", "extend"), ("e", "end early (24h)")],
@@ -215,6 +232,39 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         ),
     };
     frame.render_widget(line, area);
+}
+
+pub fn now_ms() -> u64 {
+    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    since.as_millis() as u64
+}
+
+/// "just now", "5 min ago", "2 h ago", or the day and time.
+pub fn ago(ms: u64, now: u64) -> String {
+    let minutes = now.saturating_sub(ms) / 60_000;
+    match minutes {
+        0 => "just now".into(),
+        1..=59 => format!("{minutes} min ago"),
+        60..=1439 => format!("{} h ago", minutes / 60),
+        _ => local_time(ms, "%a %H:%M"),
+    }
+}
+
+/// How sync goes, in a few words, and its color.
+pub fn sync_status(sync: &SyncView, now: u64) -> (String, Color) {
+    if sync.signed_out {
+        ("signed out".into(), Color::Yellow)
+    } else if sync.reachable == Some(false) {
+        ("server unreachable".into(), Color::Red)
+    } else if sync.syncing {
+        ("syncing…".into(), Color::Cyan)
+    } else if sync.error.is_some() {
+        ("sync failed".into(), Color::Red)
+    } else if let Some(at) = sync.last_sync_ms {
+        (format!("synced {}", ago(at, now)), Color::Green)
+    } else {
+        ("waiting to sync".into(), Color::DarkGray)
+    }
 }
 
 /// Formats a unix ms timestamp in local time.
@@ -547,6 +597,91 @@ mod tests {
         e.set_available_update(Some(habit_core::snapshot::UpdateView { version: "0.2.0".into(), url: String::new() }));
         app.set_snapshot(e.snapshot(0));
         assert_shows(&render(&app, 120, 30), &["↑ 0.2.0 available · hf update", "● connected"]);
+    }
+
+    fn synced(devices: &[(&str, &str)]) -> habit_core::snapshot::SyncView {
+        habit_core::snapshot::SyncView {
+            server: "https://sync.example".into(),
+            username: "julian".into(),
+            device: "desktop".into(),
+            reachable: Some(true),
+            last_sync_ms: Some(super::now_ms() - 3 * MIN),
+            devices: devices
+                .iter()
+                .map(|(id, name)| habit_core::snapshot::SyncDeviceView {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    last_seen_ms: None,
+                    rows: 10,
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn sync_shows_only_once_set_up() {
+        let mut e = engine();
+        let mut app = app_for(&e, 0);
+        let screen = render(&app, 120, 30);
+        assert!(!screen.contains("⇅") && !screen.contains("SYNC"), "{screen}");
+        assert!(!hints(&app).iter().any(|(k, _)| *k == "v"));
+        app.handle_key(key(KeyCode::Char('o')));
+        assert_shows(&render(&app, 120, 40), &[
+            "Sync between devices  off", "hf sync register <server> <user>", "hf sync login <server> <user>",
+            "habitfocus_sync_server",
+        ]);
+
+        e.set_sync(Some(synced(&[("aaaa", "laptop")])));
+        app.set_snapshot(e.snapshot(0));
+        app.popup = None;
+        assert_shows(&render(&app, 120, 30), &["⇅ synced 3 min ago", "SYNC", "synced      3 min ago", "laptop"]);
+        app.handle_key(key(KeyCode::Char('o')));
+        assert_shows(&render(&app, 120, 40), &[
+            "Sync between devices  synced 3 min ago", "julian on https://sync.example", "others: laptop",
+            "hf sync logout",
+        ]);
+
+        let mut down = synced(&[]);
+        down.reachable = Some(false);
+        down.error = Some("can't reach the sync server".into());
+        e.set_sync(Some(down));
+        app.set_snapshot(e.snapshot(0));
+        app.popup = None;
+        assert_shows(&render(&app, 120, 30), &["⇅ server unreachable"]);
+    }
+
+    #[test]
+    fn insights_switch_between_devices() {
+        let mut e = engine();
+        let mut app = app_for(&e, 0);
+        app.handle_key(key(KeyCode::Char('4')));
+        assert_eq!(app.handle_key(key(KeyCode::Char('v'))), Action::None, "only this device");
+        assert!(!render(&app, 120, 30).contains("Screen time ·"));
+
+        e.set_sync(Some(synced(&[("aaaa", "laptop"), ("bbbb", "phone")])));
+        app.set_snapshot(e.snapshot(0));
+        assert!(hints(&app).contains(&("v", "device")));
+        assert_shows(&render(&app, 120, 30), &["Screen time · desktop (this device)"]);
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            assert_eq!(app.handle_key(key(KeyCode::Char('v'))), Action::Refresh);
+            seen.push(app.device.clone());
+        }
+        let all = Some(habit_ipc::ALL_DEVICES.to_string());
+        assert_eq!(seen, [Some("aaaa".into()), Some("bbbb".into()), all, None]);
+
+        app.handle_key(key(KeyCode::Char('v')));
+        assert_shows(&render(&app, 120, 30), &["Screen time · laptop"]);
+        app.device = Some(habit_ipc::ALL_DEVICES.into());
+        app.wall_clock = Some(habit_core::snapshot::WallClock { today_ms: MIN, total_ms: 90 * MIN });
+        assert_shows(&render(&app, 120, 30), &["Screen time · all devices", "at any screen", "1:30:00"]);
+
+        // The laptop signs out: back to this device.
+        app.device = Some("aaaa".into());
+        e.set_sync(Some(synced(&[("bbbb", "phone")])));
+        assert!(app.set_snapshot(e.snapshot(0)), "refetch for this device");
+        assert_eq!(app.device, None);
     }
 
     #[test]

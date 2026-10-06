@@ -42,14 +42,27 @@ pub enum Request {
     Stats { days: u32 },
     /// Recent activity log entries, newest first.
     Events { limit: usize },
-    /// Screen time per app over the last `days` days, most used first.
-    AppStats { days: u32 },
+    /// Screen time per app over the last `days` days, most used first. With
+    /// `device: "all"` also the time at any screen (`Response.wall_clock`).
+    AppStats {
+        days: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device: Option<String>,
+    },
     /// The hours of one logical day, `day_offset` days back (0 = today),
     /// by habit, category and app (`Response.breakdown`).
-    HourStats { day_offset: u32 },
+    HourStats {
+        day_offset: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device: Option<String>,
+    },
     /// Every visit of one logical day, `day_offset` days back (0 = today),
     /// labelled (`Response.timeline`), with its hours (`Response.breakdown`).
-    Timeline { day_offset: u32 },
+    Timeline {
+        day_offset: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device: Option<String>,
+    },
     /// Terminal focus of a timer client (`hf tui`); `focused: None` disconnects.
     TimerFocus { source: String, focused: Option<bool> },
     /// Change a `[general]` setting in the config file and reload.
@@ -146,7 +159,13 @@ pub struct Response {
     pub breakdown: Option<habit_core::snapshot::Breakdown>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeline: Option<habit_core::snapshot::Timeline>,
+    /// Time at any screen across devices (`app_stats` with `device: "all"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_clock: Option<habit_core::snapshot::WallClock>,
 }
+
+/// The `device` of the statistics requests that means every device.
+pub const ALL_DEVICES: &str = "all";
 
 /// Blocks and habits of the config file by id, each table as written.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
