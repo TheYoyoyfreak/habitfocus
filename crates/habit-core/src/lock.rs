@@ -79,8 +79,8 @@ fn reward_rate(habit: &Habit) -> Option<f64> {
 /// Changes in `new` that make habits easier than `baseline`, described for
 /// the user. Empty means `new` is equally strict or stricter.
 pub fn weakenings(baseline: &Config, new: &Config) -> Vec<String> {
-    // `app_names`, `app_categories`, `sound`, `terminals`, `terminal_programs`,
-    // `auto_categories` and `update_check` don't change what is required or
+    // `app_names`, `app_categories`, `category_rules`, `sound`, `terminals`,
+    // `terminal_programs`, `auto_categories` and `update_check` don't change what is required or
     // blocked (only how screen time is labelled), so they never weaken anything.
     let mut out = Vec::new();
     let (old_g, new_g) = (&baseline.general, &new.general);

@@ -159,6 +159,10 @@ pub struct Response {
     pub breakdown: Option<habit_core::snapshot::Breakdown>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeline: Option<habit_core::snapshot::Timeline>,
+    /// Screen time per category path over the period, largest first
+    /// (`app_stats`; `""` is what has no category).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub categories: Option<Vec<habit_core::snapshot::CategoryTime>>,
     /// Time at any screen across devices (`app_stats` with `device: "all"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall_clock: Option<habit_core::snapshot::WallClock>,

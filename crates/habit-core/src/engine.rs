@@ -6,7 +6,8 @@ use crate::duration::{format_duration, format_duration_config, format_duration_l
 use crate::lock::{Lock, END_DELAY_MS};
 use crate::snapshot::{
     AppUsageView, Breakdown, DayView, GroupView, HabitView, HourSlice, LockView, PauseReason, RequirementView,
-    SessionView, SettingsView, Snapshot, SyncView, Timeline, TimelineAfk, TimelineVisit, UpdateView, WallClock,
+    CategoryTime, SessionView, SettingsView, Snapshot, SyncView, Timeline, TimelineAfk, TimelineVisit, UpdateView,
+    WallClock,
 };
 use crate::archive::{self, Afk, AfkReason, Record, Visit};
 use crate::stats;
@@ -965,11 +966,19 @@ impl Engine {
     /// `program` and `tmux_session` allow rules. The daemon looks up what runs in it and reports it as
     /// `Input::TerminalProgram`.
     pub fn focused_terminal(&self) -> Option<&WindowInfo> {
-        if !self.config.general.terminal_programs && !self.config.has_terminal_rules() {
+        let needed = self.config.general.terminal_programs
+            || self.config.has_terminal_rules()
+            || self.config.category_rules.iter().any(|r| r.tmux_session.is_some());
+        if !needed {
             return None;
         }
         let window = self.focused.and_then(|id| self.windows.get(&id))?;
         (window.pid.is_some() && self.config.is_terminal(&window.app_id)).then_some(window)
+    }
+
+    /// The tmux session the focused terminal shows, as the daemon reported it.
+    fn focused_tmux_session(&self) -> Option<&str> {
+        self.focused_terminal().and_then(|w| self.tmux_sessions.get(&w.id)).map(String::as_str)
     }
 
     /// What the daemon last reported in front in window `id`.
@@ -1013,11 +1022,12 @@ impl Engine {
         names
     }
 
-    /// `[app_categories]` plus the automatic categories of the keys in use.
+    /// `[app_categories]` plus the categories rules and the automatic ones
+    /// give the keys in use (rules on tmux sessions aside: those are per visit).
     fn app_categories_view(&self) -> BTreeMap<String, String> {
         let mut categories = self.config.app_categories.clone();
         for key in self.usage_keys() {
-            if let Some(category) = self.config.default_app_category(key) {
+            if let Some(category) = self.config.app_category(key) {
                 categories.entry(key.to_string()).or_insert_with(|| category.to_string());
             }
         }
@@ -1066,14 +1076,14 @@ impl Engine {
         }
         let key = if self.away() { None } else { self.usage_key() };
         // A visit continues while the same key stays focused without a gap
-        // (away, a clamped jump) and counts towards the same habit; anything
-        // else ends it.
+        // (away, a clamped jump), in the same tmux session, and counts towards
+        // the same habit; anything else ends it.
         let habit = self.counting_habit();
+        let session = key.as_ref().and_then(|_| self.focused_tmux_session()).map(str::to_string);
         let jumped = now.saturating_sub(previous) > MAX_USAGE_STEP_MS;
-        let continues = self
-            .visit
-            .as_ref()
-            .is_some_and(|v| !jumped && Some(&v.key) == key.as_ref() && v.end == previous && v.habit == habit);
+        let continues = self.visit.as_ref().is_some_and(|v| {
+            !jumped && Some(&v.key) == key.as_ref() && v.end == previous && v.habit == habit && v.tmux_session == session
+        });
         if !continues {
             self.end_visit();
         }
@@ -1100,7 +1110,14 @@ impl Engine {
                 visit.active_ms += delta;
             }
             None => {
-                self.visit = Some(Visit { key: key.clone(), start: now - delta, end: now, active_ms: delta, habit })
+                self.visit = Some(Visit {
+                    key: key.clone(),
+                    start: now - delta,
+                    end: now,
+                    active_ms: delta,
+                    habit,
+                    tmux_session: session,
+                })
             }
         }
         *self.app_pending.entry(key).or_default() += delta;
@@ -1285,7 +1302,7 @@ impl Engine {
         for visit in visits.iter().chain(current).filter(|v| v.end > from && v.start < to) {
             let (label, is_habit) = match &visit.habit {
                 Some(habit) => (self.config.habit_name(habit).to_string(), true),
-                None => match self.config.app_category(&visit.key) {
+                None => match self.config.category_of(&visit.key, visit.tmux_session.as_deref()) {
                     Some(category) => (category.to_string(), false),
                     None => (display_key(self.config.app_name(&visit.key)).to_string(), false),
                 },
@@ -1366,7 +1383,8 @@ impl Engine {
                 TimelineVisit {
                     key: v.key.clone(),
                     name: display_key(self.config.app_name(&v.key)).to_string(),
-                    category: self.config.app_category(&v.key).map(str::to_string),
+                    category: self.config.category_of(&v.key, v.tmux_session.as_deref()).map(str::to_string),
+                    tmux_session: v.tmux_session.clone(),
                     habit: v.habit.as_deref().map(|h| self.config.habit_name(h).to_string()),
                     start_ms: start,
                     end_ms: end,
@@ -1526,6 +1544,28 @@ impl Engine {
             .collect();
         usage.sort_by(|a, b| b.total_ms.cmp(&a.total_ms).then_with(|| a.app.cmp(&b.app)));
         usage
+    }
+
+    /// Screen time per category over the period, from visits, largest first:
+    /// the full category path, `""` for what has none. For the category
+    /// sunburst, so tmux sessions count (screen-time days don't know them).
+    pub fn category_times(&self, days: u32, visits: &[Visit], now: u64, source: UsageSource) -> Vec<CategoryTime> {
+        let from = self.usage_period_start(days, now);
+        let current = self.visit.as_ref().filter(|_| source.current());
+        let mut totals: BTreeMap<String, u64> = BTreeMap::new();
+        for visit in visits.iter().chain(current).filter(|v| v.end > from && v.start < now) {
+            let wall = (visit.end - visit.start).max(1);
+            let inside = visit.end.min(now) - visit.start.max(from);
+            let category = self.config.category_of(&visit.key, visit.tmux_session.as_deref()).unwrap_or_default();
+            *totals.entry(category.to_string()).or_default() += inside * visit.active_ms / wall;
+        }
+        let mut times: Vec<CategoryTime> = totals
+            .into_iter()
+            .filter(|(_, ms)| *ms > 0)
+            .map(|(category, ms)| CategoryTime { category, ms })
+            .collect();
+        times.sort_by(|a, b| b.ms.cmp(&a.ms).then_with(|| a.category.cmp(&b.category)));
+        times
     }
 
     /// Time at any screen over the period and today: the union of all
@@ -3124,6 +3164,51 @@ mod tests {
     }
 
     #[test]
+    fn tmux_sessions_split_visits_and_pick_categories() {
+        let rules = "\n[[category_rules]]\ncategory = \"Work/habitfocus\"\ntmux_session = \"habitfocus\"\n";
+        let mut e = Engine::new(Config::from_toml(&(TIMER_CONFIG.to_string() + rules)).unwrap(), State::default());
+        e.handle(Input::WindowsReset(vec![win(2, "zed"), WindowInfo { pid: Some(900), ..win(1, "kitty") }]), 0);
+        e.take_archive();
+        e.handle(Input::FocusChanged(Some(1)), 0);
+        let session = |e: &mut Engine, name: Option<&str>, now| {
+            let input = Input::TerminalProgram {
+                window: 1,
+                program: Some("nvim".into()),
+                tmux_session: name.map(str::to_string),
+            };
+            e.handle(input, now);
+        };
+        session(&mut e, Some("habitfocus"), 0);
+        tick_through(&mut e, 1000, 3 * MIN);
+        session(&mut e, Some("dotfiles"), 3 * MIN);
+        tick_through(&mut e, 3 * MIN + 1000, 4 * MIN);
+        e.handle(Input::FocusChanged(Some(2)), 4 * MIN);
+        tick_through(&mut e, 4 * MIN + 1000, 5 * MIN);
+
+        let visits: Vec<Visit> = e
+            .take_archive()
+            .into_iter()
+            .filter_map(|r| match r {
+                Record::Visit(v) => Some(v),
+                _ => None,
+            })
+            .collect();
+        let sessions: Vec<_> = visits.iter().map(|v| (v.key.as_str(), v.tmux_session.as_deref())).collect();
+        assert_eq!(sessions, [("term:nvim", Some("habitfocus")), ("term:nvim", Some("dotfiles"))], "split on the session");
+
+        let times = e.category_times(1, &visits, 5 * MIN, UsageSource::Local);
+        let by = |c: &str| times.iter().find(|t| t.category == c).map(|t| t.ms);
+        assert_eq!(by("Work/habitfocus"), Some(3 * MIN));
+        assert_eq!(by("Terminal"), Some(MIN), "other sessions: the app's category");
+        assert_eq!(by(""), Some(MIN), "zed, in progress, has none");
+        assert_eq!(times[0].category, "Work/habitfocus", "largest first");
+
+        let timeline = e.day_timeline(&visits, &[], 0, 5 * MIN, false);
+        assert_eq!(timeline.visits[0].category.as_deref(), Some("Work/habitfocus"));
+        assert_eq!(timeline.visits[0].tmux_session.as_deref(), Some("habitfocus"));
+    }
+
+    #[test]
     fn screen_time_in_terminals_goes_to_the_program() {
         let mut e = timer_engine();
         e.handle(Input::WindowChanged(WindowInfo { pid: Some(900), ..win(1, "kitty") }), 0);
@@ -3897,6 +3982,7 @@ mod tests {
             end: start + minutes * MIN,
             active_ms: minutes * MIN,
             habit: None,
+            tmux_session: None,
         };
         let visits = [
             visit(8 * HOUR, 5),                           // yesterday, local 10:00
@@ -3975,6 +4061,7 @@ mod tests {
             end: start + minutes * MIN,
             active_ms: minutes * MIN,
             habit: habit.map(str::to_string),
+            tmux_session: None,
         };
         let visits = [
             visit("zathura", DAY + 9 * HOUR + 50 * MIN, 20, None), // local 11:50-12:10
@@ -4033,6 +4120,7 @@ mod tests {
             end: start + minutes * MIN,
             active_ms: minutes * MIN,
             habit: None,
+            tmux_session: None,
         };
         // The laptop's: one across the day start, one 30 s after it.
         let laptop = [visit("firefox", today - 10 * MIN, 20), visit("firefox", today + 10 * MIN + 30_000, 1)];
@@ -4062,7 +4150,7 @@ mod tests {
         const DAY: u64 = 24 * HOUR;
         let e = engine();
         let now = DAY + 12 * HOUR;
-        let visit = |start: u64, end: u64| Visit { key: "x".into(), start, end, active_ms: end - start, habit: None };
+        let visit = |start: u64, end: u64| Visit { key: "x".into(), start, end, active_ms: end - start, habit: None, ..Default::default() };
         let visits = [
             visit(DAY - HOUR, DAY + HOUR),          // laptop, across the day start
             visit(DAY + 30 * MIN, DAY + 2 * HOUR),  // phone, overlapping
@@ -4088,6 +4176,7 @@ mod tests {
             end,
             active_ms: end - start,
             habit: habit.map(str::to_string),
+            tmux_session: None,
         };
         let visits = [
             visit("zed", DAY - 30 * MIN, DAY + 30 * MIN, None), // across midnight

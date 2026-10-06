@@ -19,9 +19,69 @@ pub struct Config {
     #[serde(default)]
     pub app_names: BTreeMap<String, String>,
     /// Categories of screen-time keys, e.g. `steam_app_275850 = "Games"`, for
-    /// grouping screen time. Labels too.
+    /// grouping screen time. Labels too. A category can be a path of
+    /// subcategories: "Media/Games".
     #[serde(default)]
     pub app_categories: BTreeMap<String, String>,
+    /// Categories by pattern, for what `[app_categories]` doesn't name, and
+    /// by tmux session. Labels too.
+    #[serde(default)]
+    pub category_rules: Vec<CategoryRule>,
+}
+
+/// Puts screen time in a category by pattern:
+///
+/// ```toml
+/// [[category_rules]]
+/// category = "Media/Video"
+/// match = "youtube|twitch|vlc"
+///
+/// [[category_rules]]
+/// category = "Work/habitfocus"
+/// tmux_session = "habitfocus"
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CategoryRule {
+    pub category: String,
+    /// Regex (ignoring case) on the app id, `site:<host>` or `term:<program>`,
+    /// or the name shown for it.
+    #[serde(default, rename = "match")]
+    pub pattern: Option<String>,
+    /// Regex (ignoring case) on the tmux session a terminal shows.
+    #[serde(default)]
+    pub tmux_session: Option<String>,
+    #[serde(skip)]
+    pattern_re: Option<Regex>,
+    #[serde(skip)]
+    session_re: Option<Regex>,
+}
+
+impl CategoryRule {
+    /// Whether the rule takes screen time on `key` (named `name`) in tmux
+    /// session `session`. Every condition it has must hold.
+    fn matches(&self, key: &str, name: &str, session: Option<&str>) -> bool {
+        let pattern = self.pattern_re.as_ref().is_none_or(|re| re.is_match(key) || re.is_match(name));
+        let session = match &self.session_re {
+            Some(re) => session.is_some_and(|s| re.is_match(s)),
+            None => true,
+        };
+        pattern && session
+    }
+}
+
+/// Category separator: "Media/Video" is Video in Media.
+pub const CATEGORY_SEPARATOR: char = '/';
+
+/// A category path without stray spaces or empty parts: " Media / Video/" is
+/// "Media/Video". Empty when nothing's left.
+pub fn normalize_category(category: &str) -> String {
+    category
+        .split(CATEGORY_SEPARATOR)
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(&CATEGORY_SEPARATOR.to_string())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -645,6 +705,30 @@ impl Config {
                 return Err(format!("{table}: the entry for {key:?} is empty"));
             }
         }
+        for (key, category) in &mut self.app_categories {
+            *category = normalize_category(category);
+            if category.is_empty() {
+                return Err(format!("app_categories: the entry for {key:?} is empty"));
+            }
+        }
+        for (i, rule) in self.category_rules.iter_mut().enumerate() {
+            let at = format!("category_rules[{}]", i + 1);
+            rule.category = normalize_category(&rule.category);
+            if rule.category.is_empty() {
+                return Err(format!("{at}: `category` is empty"));
+            }
+            let compile = |pattern: &Option<String>, field: &str| -> Result<Option<Regex>, String> {
+                pattern
+                    .as_ref()
+                    .map(|p| Regex::new(&format!("(?i){p}")).map_err(|e| format!("{at}: invalid `{field}` regex: {e}")))
+                    .transpose()
+            };
+            rule.pattern_re = compile(&rule.pattern, "match")?;
+            rule.session_re = compile(&rule.tmux_session, "tmux_session")?;
+            if rule.pattern_re.is_none() && rule.session_re.is_none() {
+                return Err(format!("{at} ({}): needs `match` or `tmux_session`", rule.category));
+            }
+        }
         for (id, group) in &mut self.groups {
             if let Some(bad) = group.domains.iter().find(|d| !is_valid_domain(d)) {
                 return Err(format!(
@@ -790,13 +874,29 @@ impl Config {
         PROGRAM_NAMES.iter().find(|(p, _)| *p == program).map(|(_, name)| *name)
     }
 
-    /// The category of a screen-time key: from `[app_categories]`, else the
-    /// automatic one.
+    /// The category of a screen-time key, whatever tmux session it showed.
     pub fn app_category(&self, key: &str) -> Option<&str> {
-        match self.app_categories.get(key) {
-            Some(category) => Some(category),
-            None => self.default_app_category(key),
-        }
+        self.category_of(key, None)
+    }
+
+    /// The category of screen time on `key` shown in tmux session `session`.
+    /// The most specific wins: a rule on the tmux session, then
+    /// `[app_categories]`, then a rule on the app (the first in the file),
+    /// then the automatic category.
+    pub fn category_of(&self, key: &str, session: Option<&str>) -> Option<&str> {
+        let name = self.app_name(key);
+        let rule = |by_session: bool| {
+            self.category_rules
+                .iter()
+                .filter(|r| r.session_re.is_some() == by_session)
+                .find(|r| r.matches(key, name, session))
+                .map(|r| r.category.as_str())
+        };
+        session
+            .and_then(|_| rule(true))
+            .or_else(|| self.app_categories.get(key).map(String::as_str))
+            .or_else(|| rule(false))
+            .or_else(|| self.default_app_category(key))
     }
 
     /// "Terminal" for terminals and their programs, "Browser" for browsers
@@ -1141,5 +1241,59 @@ mod tests {
         }
         let err = Config::from_toml("[groups.s]\ndomains = [\"https://reddit.com\"]").unwrap_err();
         assert!(err.contains("invalid domain"));
+    }
+
+    #[test]
+    fn categories_are_paths_and_rules_fill_in() {
+        let config = Config::from_toml(
+            r#"
+            [app_categories]
+            "site:www.youtube.com" = " Media / Video/ "
+            kitty = "Work/Terminal"
+
+            [app_names]
+            steam_app_42 = "RimWorld"
+
+            [[category_rules]]
+            category = "Media/Video"
+            match = "twitch|YOUTUBE"
+
+            [[category_rules]]
+            category = "Media/Games"
+            match = "rimworld|minecraft"
+
+            [[category_rules]]
+            category = "Work/Programming/habitfocus"
+            tmux_session = "^habitfocus$"
+
+            [[category_rules]]
+            category = "Work/Programming/nvim elsewhere"
+            match = "term:nvim"
+            tmux_session = "."
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.app_category("site:www.youtube.com"), Some("Media/Video"), "normalized");
+        assert_eq!(config.app_category("site:www.twitch.tv"), Some("Media/Video"), "rule, ignoring case");
+        assert_eq!(config.app_category("steam_app_42"), Some("Media/Games"), "by the name shown");
+        assert_eq!(config.app_category("zed"), None);
+        assert_eq!(config.app_category("term:htop"), Some("Terminal"), "automatic last");
+        // A rule on the tmux session beats the exact category of the app.
+        assert_eq!(config.category_of("kitty", Some("habitfocus")), Some("Work/Programming/habitfocus"));
+        assert_eq!(config.category_of("kitty", Some("other")), Some("Work/Terminal"));
+        assert_eq!(config.category_of("kitty", None), Some("Work/Terminal"));
+        // All of a rule's conditions must hold.
+        assert_eq!(config.category_of("term:nvim", Some("dotfiles")), Some("Work/Programming/nvim elsewhere"));
+        assert_eq!(config.category_of("term:nvim", None), Some("Terminal"));
+    }
+
+    #[test]
+    fn category_rules_are_checked() {
+        let rule = |body: &str| Config::from_toml(&format!("[[category_rules]]\n{body}")).unwrap_err();
+        assert!(rule("category = \"Media\"").contains("needs `match` or `tmux_session`"));
+        assert!(rule("category = \" / \"\nmatch = \"x\"").contains("`category` is empty"));
+        assert!(rule("category = \"Media\"\nmatch = \"(\"").contains("invalid `match` regex"));
+        assert!(rule("category = \"Media\"\nmatch = \"x\"\ntitle = \"y\"").contains("unknown field"));
+        assert!(Config::from_toml("[app_categories]\nzed = \" / \"").unwrap_err().contains("is empty"));
     }
 }

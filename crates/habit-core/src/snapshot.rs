@@ -76,6 +76,14 @@ pub struct SyncDeviceView {
     pub rows: u64,
 }
 
+/// Screen time in one category over a period (`app_stats`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CategoryTime {
+    /// The full path, e.g. "Media/Video"; empty for screen time without one.
+    pub category: String,
+    pub ms: u64,
+}
+
 /// Screen time across devices counted once: time spent at any screen (the
 /// union of all visits), next to the summed time of the Insights rows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,6 +201,9 @@ pub struct TimelineVisit {
     pub category: Option<String>,
     /// Name of the habit whose session was counting.
     pub habit: Option<String>,
+    /// The tmux session a terminal showed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux_session: Option<String>,
     pub start_ms: u64,
     pub end_ms: u64,
     /// Not idle, within `start_ms`..`end_ms`.

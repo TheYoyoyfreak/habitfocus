@@ -270,6 +270,15 @@ clamped to `MAX_USAGE_STEP_MS` (5 s, so a suspend isn't counted) and skipped whi
 `state.app_days[day][key]`, pruned to `general.screen_time_days`. They're saved lazily: `take_usage_dirty` is separate
 from `take_dirty`, the daemon saves them every 60 ticks and `flush_usage` on shutdown.
 
+**Categories** (`Config::category_of(key, tmux_session)`): category names are paths (`"Media/Video"`,
+`normalize_category` trims them); `[[category_rules]]` add patterns (`match` on the key or its display name,
+`tmux_session` on the session, both regexes compiled with `(?i)` in `prepare`). Precedence: a rule with
+`tmux_session` that matches, then `[app_categories]`, then the first `match`-only rule, then the automatic category.
+Visits carry the tmux session the focused terminal showed (`Visit::tmux_session`, from `Input::TerminalProgram`;
+a session change ends the visit), and categories are resolved when reading, so rules apply to the past too.
+`Engine::category_times` totals a period's visits per category path for the `hf web` sunburst
+(`Response.categories` on `app_stats`); the snapshot's `app_categories` has each key's category without a session.
+
 `state.events` is the activity log (capped at 500, newest last) and `events_seq` counts every event ever pushed, so
 clients refetch only when it moves. The full log lives in the archive (below). `log_event` records; `log_and_notify` also emits a notification whose title comes
 from `Engine::event_title(kind)`. `text` is rendered by the engine so every client shows the same wording.
@@ -308,6 +317,8 @@ version refuses to open) and imports state.json's events and history into a new 
 `events` request (state.json's copy is the fallback), `visits(from, to)` the `app_stats` request (insights and the
 hourly breakdown). Schema 2 added the visits' habit column, schema 3 the `afk` table; `migrate` changes the database in place. If the database
 can't be opened habitd runs without it, logs why, and `app_stats` has no session or hour data.
+
+Schema 5 adds `visits.tmux_session`.
 
 Schema 4 prepares multi-device sync (see `docs/SYNC_CONCEPT.md` on the `concept/sync` branch). The `device` table
 holds this installation's identity, a random UUID and the hostname, created once with the database; the UUID is the
@@ -553,6 +564,11 @@ With sync, the header shows `snapshot.sync` and Timeline and Screen time get a d
 the views pass `device` (an id or `all`) to `timeline` and `app_stats`; `api_request` only lets ids through that
 are letters, digits and hyphens. Screen time shows `Response.wall_clock` for all devices. Without other devices
 none of it appears.
+
+The category sunburst (`categoryPanel`) builds a tree from `Response.categories` by splitting the paths at `/`;
+rings show up to three levels below the category zoomed into (`ui.catRoot`), arcs sized by total time, so a
+category's own time is the gap in the next ring. Top categories take the chart colors in order of time, their
+subcategories `color-mix` shades of them; time without a category is gray.
 
 ### Native host (`native_host.rs`)
 

@@ -306,7 +306,9 @@ impl Syncer {
             self.last_ok_ms = Some(now_ms());
         }
         match &result {
-            Ok(s) if s.sent + s.received > 0 => eprintln!("habitd: synced: sent {} rows, received {}", s.sent, s.received),
+            Ok(s) if s.sent + s.received > 0 => {
+                eprintln!("habitd: synced: sent {}, received {}", rows(s.sent), rows(s.received))
+            }
             Ok(_) if failed_before => eprintln!("habitd: sync works again"),
             Ok(_) => {}
             Err(SyncError::Api(ApiError::SignedOut)) => {

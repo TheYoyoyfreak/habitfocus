@@ -250,6 +250,29 @@ Terminals and their programs are in the category **Terminal**, browsers (`genera
 **Browser**, so `g` totals them. `[app_categories]` overrides this per key; `auto_categories = false` (or the TUI
 settings) turns it off.
 
+**Subcategories** are paths: `"Media/Video"` is Video in Media, `"Work/Programming/habitfocus"` goes three deep.
+Type them like that at `c`, or write them in `[app_categories]`. **Rules** categorize what isn't named there by
+pattern, like ActivityWatch:
+
+```toml
+[[category_rules]]
+category = "Media/Video"
+match = "youtube|twitch|plex|vlc"      # regex on the app id, site:… or term:…, or its name; ignores case
+
+[[category_rules]]
+category = "Work/Programming/habitfocus"
+tmux_session = "habitfocus"            # regex on the tmux session the terminal shows
+```
+
+The most specific wins: a rule on the tmux session, then `[app_categories]`, then the first `match` rule, then the
+automatic Terminal and Browser. habitd records the tmux session with every visit (with `terminal_programs`, the
+default), so `tmux_session` rules track time per project. Categories are worked out when you look, so new rules also
+sort what's already recorded; sessions are known from this version on.
+
+In `hf web`, Screen time shows the categories as a **sunburst**: the top categories inside, their subcategories
+around them, with time and share next to it. Click a category to zoom in, the middle to zoom out. It follows the
+period and the device you picked.
+
 The **hourly chart** under the table shows the time on screen per hour of the day. On the "All" row the bars are
 stacked and colored by what the time went to, with a legend below; pick an app, site or category with `j`/`k` and
 the chart shows only that one's hours. `[` and `]` step to an earlier or later day (the title says "Today",

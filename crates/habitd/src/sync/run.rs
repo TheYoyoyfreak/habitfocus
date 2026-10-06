@@ -293,7 +293,7 @@ pub mod tests {
     }
 
     pub fn visit(key: &str, start: u64) -> Record {
-        Record::Visit(Visit { key: key.into(), start, end: start + 10, active_ms: 10, habit: None })
+        Record::Visit(Visit { key: key.into(), start, end: start + 10, active_ms: 10, habit: None, ..Default::default() })
     }
 
     fn event(at: u64) -> Record {

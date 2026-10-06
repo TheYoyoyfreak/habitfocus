@@ -92,6 +92,18 @@ td.bar { width: 30%; min-width: 80px; }
 .table-box thead th { position: sticky; top: 0; background: var(--panel); }
 .barcell { height: 8px; background: var(--cyan); border-radius: 0 2px 2px 0; }
 .tag { color: var(--dim); margin-left: 6px; }
+.sunburst { display: flex; flex-wrap: wrap; gap: 8px 28px; align-items: flex-start; }
+.sunburst svg { width: min(100%, 320px); height: auto; flex: none; }
+.sunburst svg path { cursor: pointer; stroke: var(--panel); stroke-width: 1; }
+.sunburst svg path:hover { opacity: .8; }
+.sunburst .center { cursor: pointer; fill: var(--panel); }
+.sunburst .center-name { fill: var(--fg); font-weight: 700; font-size: 13px; }
+.sunburst .center-ms { fill: var(--fg); font-size: 15px; }
+.cat-list { flex: 0 1 480px; min-width: min(100%, 300px); border-collapse: collapse; }
+.cat-list td { padding: 2px 8px 2px 0; white-space: nowrap; }
+.cat-list tr[data-cat] { cursor: pointer; }
+.cat-list tr[data-cat]:hover td { background: var(--sel); }
+.cat-list .num { text-align: right; }
 .grid2 { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); }
 .habit { display: grid; gap: 6px; }
 .habit + .habit { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--border); }
@@ -157,6 +169,7 @@ const ui = {
   filter: "",
   selected: null,      // row label; null is the total
   sort: ["total", -1],
+  catRoot: "",         // the category the sunburst is zoomed into ("" is all)
   // Timeline and screen time: null is this device, else a synced device's
   // id or "all".
   device: null,
@@ -683,7 +696,7 @@ function addRow(into, r) {
   into.keys.push(...r.keys);
 }
 
-function renderScreen({ app_stats: apps = [], breakdown, wall_clock: clock }) {
+function renderScreen({ app_stats: apps = [], breakdown, wall_clock: clock, categories = [] }) {
   const rows = usageRows(apps);
   const total = { key: null, label: ui.filter ? "All shown" : ui.byCategory ? "All categories" : "All apps", today: 0, total: 0, longest: 0, hours: [], days: [], keys: [] };
   rows.forEach(r => addRow(total, r));
@@ -728,11 +741,137 @@ function renderScreen({ app_stats: apps = [], breakdown, wall_clock: clock }) {
       <div class="table-box"><table><thead><tr>${th}</tr></thead>
       <tbody>${tr(total, true)}${rows.map(r => tr(r, false)).join("")}</tbody></table></div>
       ${rows.length ? "" : '<div class="empty">Nothing matches.</div>'}</div>
+    ${categoryPanel(categories)}
     <div class="grid2">
       <div class="panel"><span class="title">Time of day <span class="dim">· ${esc(sel?.label ?? total.label)}</span></span>${hourPanel}</div>
       ${daysPanel}
     </div>`;
 }
+// ---- Categories sunburst -----------------------------------------------------------
+
+/** Most rings below the category the sunburst shows. */
+const CATEGORY_RINGS = 3;
+const UNCATEGORIZED_PATH = "\u0000";
+
+/** The category tree of `app_stats`' `categories`: every node has its total
+    (`ms`, its subcategories included) and what's in it directly (`own`). */
+function categoryTree(times) {
+  const node = (name, path) => ({ name, path, ms: 0, own: 0, children: [] });
+  const root = node("All categories", "");
+  for (const { category, ms } of times) {
+    const parts = category ? category.split("/") : [UNCATEGORIZED];
+    let at = root;
+    root.ms += ms;
+    parts.forEach((part, i) => {
+      const path = category ? parts.slice(0, i + 1).join("/") : UNCATEGORIZED_PATH;
+      let child = at.children.find(c => c.path === path);
+      if (!child) at.children.push(child = node(part, path));
+      at = child;
+      at.ms += ms;
+    });
+    at.own += ms;
+  }
+  const sort = n => { n.children.sort((a, b) => (a.path === UNCATEGORIZED_PATH) - (b.path === UNCATEGORIZED_PATH) || b.ms - a.ms); n.children.forEach(sort); };
+  sort(root);
+  return root;
+}
+function findCategory(node, path) {
+  if (node.path === path) return node;
+  for (const c of node.children) {
+    const found = findCategory(c, path);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** Top categories get the chart colors in order of time, their
+    subcategories lighter shades of them; no category is gray. */
+function categoryColors(root) {
+  const colors = new Map();
+  // How much of the parent's color siblings keep: far apart, so neighbors differ.
+  const MIX = [85, 55, 70, 40, 78, 48];
+  const shade = (node, color, depth) => {
+    node.children.forEach((c, i) => {
+      const mix = MIX[i % MIX.length] - (depth - 2) * 8;
+      const own = c.path === UNCATEGORIZED_PATH ? "var(--other)"
+        : depth === 1 ? (i < SLOTS ? `var(--s${i + 1})` : "var(--other)")
+        : `color-mix(in srgb, ${color} ${mix}%, var(--panel))`;
+      colors.set(c.path, own);
+      shade(c, own, depth + 1);
+    });
+  };
+  shade(root, null, 1);
+  return colors;
+}
+
+/** An annular sector from angle a0 to a1 (radians, 0 at the top, clockwise). */
+function sector(r0, r1, a0, a1) {
+  if (a1 - a0 >= 2 * Math.PI - 1e-6) a1 = a0 + 2 * Math.PI - 1e-4;
+  const pt = (r, a) => `${(150 + r * Math.sin(a)).toFixed(2)} ${(150 - r * Math.cos(a)).toFixed(2)}`;
+  const large = a1 - a0 > Math.PI ? 1 : 0;
+  return `M${pt(r1, a0)} A${r1} ${r1} 0 ${large} 1 ${pt(r1, a1)} L${pt(r0, a1)} A${r0} ${r0} 0 ${large} 0 ${pt(r0, a0)} Z`;
+}
+
+function categoryPanel(times) {
+  const tree = categoryTree(times);
+  const title = `<span class="title">Categories<span class="dim">${deviceSuffix()} · ${ui.days === 1 ? "today" : `${ui.days} days`}</span></span>`;
+  if (!tree.ms) return `<div class="panel">${title}<div class="empty">No screen time in this period.</div></div>`;
+  const root = findCategory(tree, ui.catRoot) ?? tree;
+  if (root === tree) ui.catRoot = "";
+  const colors = categoryColors(tree);
+  const hole = 58, outer = 148, ring = (outer - hole) / CATEGORY_RINGS;
+  const pct = ms => `${Math.round((ms / root.ms) * 100)}%`;
+  let arcs = "";
+  const draw = (node, depth, a0) => {
+    let a = a0;
+    for (const c of node.children) {
+      const span = (c.ms / root.ms) * 2 * Math.PI;
+      if (span > 0.002) {
+        const tipHtml = `<div><b>${esc(c.path === UNCATEGORIZED_PATH ? UNCATEGORIZED : c.path)}</b></div>`
+          + tipRow("time", dur(c.ms)) + tipRow("share", `${pct(c.ms)} of ${root.path ? root.name : "all"}`)
+          + (c.own && c.children.length ? tipRow("directly", dur(c.own)) : "");
+        arcs += `<path d="${sector(hole + (depth - 1) * ring, hole + depth * ring, a, a + span)}" fill="${colors.get(c.path)}"
+          ${c.children.length ? `data-cat="${esc(c.path)}"` : ""} data-tip="${esc(tipHtml)}"/>`;
+        if (depth < CATEGORY_RINGS) draw(c, depth + 1, a);
+      }
+      a += span;
+    }
+  };
+  draw(root, 1, 0);
+  const centerName = root.path === "" ? "All" : root.name;
+  const svg = `<svg ${svgNS} viewBox="0 0 300 300" role="img" aria-label="Screen time by category">
+    ${arcs}
+    <circle class="center" cx="150" cy="150" r="${hole - 2}" ${root.path ? `data-cat-up="1"` : ""}><title>${root.path ? "Back out" : ""}</title></circle>
+    <text class="center-name" x="150" y="146" text-anchor="middle">${esc(centerName.length > 14 ? centerName.slice(0, 13) + "…" : centerName)}</text>
+    <text class="center-ms" x="150" y="166" text-anchor="middle">${dur(root.ms)}</text>
+    ${root.path ? '<text x="150" y="184" text-anchor="middle">▲ back</text>' : ""}
+  </svg>`;
+
+  // The list: the shown category's subcategories, two levels deep.
+  let rows = "";
+  const list = (node, depth) => {
+    for (const c of node.children) {
+      const name = c.path === UNCATEGORIZED_PATH ? UNCATEGORIZED : c.name;
+      rows += `<tr ${c.children.length ? `data-cat="${esc(c.path)}"` : ""}>
+        <td style="padding-left:${(depth - 1) * 18}px"><i class="sw" style="background:${colors.get(c.path)}"></i>${depth === 1 ? `<b>${esc(name)}</b>` : esc(name)}</td>
+        <td class="num">${dur(c.ms)}</td><td class="num dim">${pct(c.ms)}</td></tr>`;
+      if (depth < 2) list(c, depth + 1);
+    }
+    if (depth > 1 && node.own && node.children.length) {
+      rows += `<tr><td style="padding-left:${(depth - 1) * 18}px" class="dim">${esc(node.name)} itself</td>
+        <td class="num dim">${dur(node.own)}</td><td class="num dim">${pct(node.own)}</td></tr>`;
+    }
+  };
+  list(root, 1);
+  const crumbs = root.path
+    ? `<div class="controls" style="margin-bottom:6px"><button class="ctl" data-cat-up="1">◀ ${esc(root.path.includes("/") ? root.path.slice(0, root.path.lastIndexOf("/")) : "All categories")}</button><b>${esc(root.path)}</b></div>`
+    : "";
+  const hint = times.length === 1 && !times[0].category
+    ? '<div class="dim" style="margin-top:6px">Nothing has a category yet: <code>c</code> in the TUI\'s Insights, <code>[app_categories]</code> or <code>[[category_rules]]</code> in the config.</div>'
+    : "";
+  return `<div class="panel">${title}${crumbs}<div class="sunburst">${svg}<table class="cat-list"><tbody>${rows}</tbody></table></div>${hint}</div>`;
+}
+
 function stackedHours(breakdown, shown) {
   const slices = (breakdown?.slices ?? []).filter(s => shown.has(s.key));
   const habits = new Set(slices.filter(s => s.habit).map(s => s.label));
@@ -866,8 +1005,13 @@ function renderLog({ events = [] }) {
 // ---- input --------------------------------------------------------------------
 
 main.addEventListener("click", e => {
-  const t = e.target.closest("[data-act],[data-days],[data-sort],[data-device],tr[data-row]");
+  const t = e.target.closest("[data-act],[data-days],[data-sort],[data-device],[data-cat],[data-cat-up],tr[data-row]");
   if (!t) return;
+  if (t.dataset.cat !== undefined) { ui.catRoot = t.dataset.cat; tip.style.display = "none"; return render(); }
+  if (t.dataset.catUp) {
+    ui.catRoot = ui.catRoot.includes("/") ? ui.catRoot.slice(0, ui.catRoot.lastIndexOf("/")) : "";
+    return render();
+  }
   if (t.dataset.device !== undefined) return setDevice(t.dataset.device);
   if (t.dataset.days) { ui.days = Number(t.dataset.days); return load(); }
   if (t.dataset.sort) {

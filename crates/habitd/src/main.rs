@@ -484,6 +484,7 @@ impl Daemon {
             let visits = self.archive.as_ref().and_then(|a| a.visits_of(&devices, from, now).ok()).unwrap_or_default();
             response.breakdown = Some(engine.period_breakdown_for(&visits, days, now, source));
             response.app_stats = Some(engine.app_insights_for(days, &visits, now, source));
+            response.categories = Some(engine.category_times(days, &visits, now, source));
             if source == UsageSource::Combined {
                 response.wall_clock = Some(engine.wall_clock(days, &visits, now));
             }

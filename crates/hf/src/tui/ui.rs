@@ -721,6 +721,7 @@ mod tests {
             end,
             active_ms: end - start,
             habit: None,
+            tmux_session: None,
         };
         let visits = [visit("zed", 0, 30_000), visit("zed", 100_000, 150_000)];
         app.apps = e.app_insights(7, &visits, 150_000);
@@ -811,6 +812,7 @@ mod tests {
             end,
             active_ms: end - start,
             habit: habit.map(str::to_string),
+            tmux_session: None,
         };
         let visits = [visit("zed", 0, 90_000, None), visit("zathura", 90_000, 150_000, Some("reading"))];
         app.apps = e.app_insights(7, &visits, 150_000);

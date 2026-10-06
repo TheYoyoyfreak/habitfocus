@@ -16,7 +16,7 @@ use serde::Serialize;
 use std::path::Path;
 
 /// Schema version, stored in `PRAGMA user_version`.
-const VERSION: i64 = 4;
+const VERSION: i64 = 5;
 
 const SCHEMA: &str = "
     CREATE TABLE events (
@@ -96,6 +96,10 @@ const SYNC_SCHEMA: &str = "
         value TEXT NOT NULL
     );
 ";
+
+/// Visits remember the tmux session a terminal showed (schema 5), for
+/// category rules on projects.
+const TMUX_SCHEMA: &str = "ALTER TABLE visits ADD COLUMN tmux_session TEXT;";
 
 /// This installation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,7 +252,7 @@ impl Archive {
     /// Visits of `devices` that overlap `from..to`, oldest first.
     pub fn visits_of(&self, devices: &Devices, from: u64, to: u64) -> anyhow::Result<Vec<Visit>> {
         let mut stmt = self.conn.prepare(
-            "SELECT key, start_ms, end_ms, active_ms, habit FROM visits
+            "SELECT key, start_ms, end_ms, active_ms, habit, tmux_session FROM visits
              WHERE (device IS ?3 OR ?3 = '*') AND end_ms > ?1 AND start_ms < ?2 ORDER BY start_ms, id",
         )?;
         let rows = stmt.query_map(params![from as i64, to as i64, devices.param()], |row| {
@@ -258,6 +262,7 @@ impl Archive {
                 end: row.get::<_, i64>(2)? as u64,
                 active_ms: row.get::<_, i64>(3)? as u64,
                 habit: row.get(4)?,
+                tmux_session: row.get(5)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -327,7 +332,7 @@ impl Archive {
             }
             Table::Visits => {
                 let mut stmt = self.conn.prepare(
-                    "SELECT id, key, start_ms, end_ms, active_ms, habit FROM visits
+                    "SELECT id, key, start_ms, end_ms, active_ms, habit, tmux_session FROM visits
                      WHERE device IS NULL AND id > ?1 ORDER BY id LIMIT ?2",
                 )?;
                 let mut query = stmt.query(params![after, limit])?;
@@ -338,6 +343,7 @@ impl Archive {
                         end: r.get::<_, i64>(3)? as u64,
                         active_ms: r.get::<_, i64>(4)? as u64,
                         habit: r.get(5)?,
+                        tmux_session: r.get(6)?,
                     };
                     rows.push(row(r.get(0)?, Record::Visit(visit)));
                 }
@@ -484,6 +490,9 @@ fn migrate(conn: &mut Connection, state: &State) -> anyhow::Result<Device> {
     if version < 4 {
         tx.execute_batch(SYNC_SCHEMA)?;
     }
+    if version < 5 {
+        tx.execute_batch(TMUX_SCHEMA)?;
+    }
     if version == 0 {
         // A new archive starts with the history still in state.json.
         let imported: Vec<Record> = state
@@ -554,9 +563,19 @@ fn insert_row(conn: &Connection, record: &Record, origin: Option<(&str, &str)>) 
             ]),
         Record::Visit(v) => conn
             .prepare_cached(&format!(
-                "{verb} INTO visits (key, start_ms, end_ms, active_ms, habit, device, uid) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+                "{verb} INTO visits (key, start_ms, end_ms, active_ms, habit, tmux_session, device, uid)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
             ))?
-            .execute(params![v.key, v.start as i64, v.end as i64, v.active_ms as i64, v.habit, device, uid]),
+            .execute(params![
+                v.key,
+                v.start as i64,
+                v.end as i64,
+                v.active_ms as i64,
+                v.habit,
+                v.tmux_session,
+                device,
+                uid
+            ]),
         Record::Afk(a) => conn
             .prepare_cached(&format!(
                 "{verb} INTO afk (start_ms, end_ms, reason, device, uid) VALUES (?1, ?2, ?3, ?4, ?5)"
@@ -570,7 +589,7 @@ mod tests {
     use super::*;
     use habit_core::state::HistoryEntry;
 
-    /// A database as an older habitd left it, at schema `version` (1 to 3).
+    /// A database as an older habitd left it, at schema `version` (1 to 4).
     fn old_database(version: i64) -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA).unwrap();
@@ -579,6 +598,10 @@ mod tests {
         }
         if version >= 3 {
             conn.execute_batch(AFK_SCHEMA).unwrap();
+        }
+        if version >= 4 {
+            conn.execute_batch(SYNC_SCHEMA).unwrap();
+            conn.execute("INSERT INTO device (id, name) VALUES ('d', 'old')", []).unwrap();
         }
         conn.pragma_update(None, "user_version", version).unwrap();
         conn
@@ -622,7 +645,7 @@ mod tests {
     fn visits_are_queried_by_overlap() {
         let mut archive = Archive::in_memory(&State::default());
         let visit = |key: &str, start, end| {
-            Record::Visit(Visit { key: key.into(), start, end, active_ms: end - start, habit: None })
+            Record::Visit(Visit { key: key.into(), start, end, active_ms: end - start, habit: None, ..Default::default() })
         };
         archive.write(&[visit("kitty", 0, 100), visit("zen", 100, 200), visit("kitty", 300, 400)]).unwrap();
         let keys = |from, to| archive.visits(from, to).unwrap().into_iter().map(|v| v.key).collect::<Vec<_>>();
@@ -637,7 +660,7 @@ mod tests {
         let mut old = migrated(conn);
         let visits = old.visits(0, 1000).unwrap();
         assert_eq!((visits[0].key.as_str(), visits[0].habit.clone()), ("kitty", None));
-        old.write(&[Record::Visit(Visit { key: "zed".into(), start: 0, end: 5, active_ms: 5, habit: Some("read".into()) })]).unwrap();
+        old.write(&[Record::Visit(Visit { key: "zed".into(), start: 0, end: 5, active_ms: 5, habit: Some("read".into()), ..Default::default() })]).unwrap();
         assert_eq!(old.visits(0, 1000).unwrap()[1].habit.as_deref(), Some("read"));
     }
 
@@ -668,7 +691,7 @@ mod tests {
                 focused_ms: 10,
                 outcome: Outcome::Completed,
             }),
-            Record::Visit(Visit { key: "site:example.org".into(), start: at, end: at + 5, active_ms: 5, habit: None }),
+            Record::Visit(Visit { key: "site:example.org".into(), start: at, end: at + 5, active_ms: 5, habit: None, ..Default::default() }),
             Record::Afk(Afk { start: at + 5, end: at + 9, reason: AfkReason::Asleep }),
         ]
     }
@@ -686,6 +709,30 @@ mod tests {
         // Rows from before sync are this device's and go out with the first push.
         let rows = archive.local_rows(Table::Visits, 0, 10).unwrap();
         assert_eq!(rows[0].uid, format!("{}:visits:1", archive.device().id));
+    }
+
+    #[test]
+    fn schema_4_gains_the_tmux_session_of_visits() {
+        let conn = old_database(4);
+        conn.execute("INSERT INTO visits (key, start_ms, end_ms, active_ms) VALUES ('kitty', 0, 100, 100)", []).unwrap();
+        let mut archive = migrated(conn);
+        assert_eq!(archive.device().id, "d", "keeps its identity");
+        let visit = |session: Option<&str>| Visit {
+            key: "term:nvim".into(),
+            start: 200,
+            end: 300,
+            active_ms: 100,
+            habit: None,
+            tmux_session: session.map(str::to_string),
+        };
+        archive.write(&[Record::Visit(visit(Some("habitfocus")))]).unwrap();
+        archive.insert_remote("d2", &[("d2:visits:1".into(), Record::Visit(visit(Some("dotfiles"))))]).unwrap();
+        let sessions = |devices| -> Vec<Option<String>> {
+            archive.visits_of(&devices, 0, 1000).unwrap().into_iter().map(|v| v.tmux_session).collect()
+        };
+        assert_eq!(sessions(Devices::This), [None, Some("habitfocus".into())]);
+        assert_eq!(sessions(Devices::One("d2".into())), [Some("dotfiles".into())]);
+        assert_eq!(archive.local_rows(Table::Visits, 1, 10).unwrap()[0].record, Record::Visit(visit(Some("habitfocus"))));
     }
 
     #[test]
@@ -724,7 +771,7 @@ mod tests {
     #[test]
     fn remote_rows_are_stored_once_and_kept_out_of_this_devices_views() {
         let mut archive = Archive::in_memory(&State::default());
-        archive.write(&[Record::Visit(Visit { key: "kitty".into(), start: 500, end: 600, active_ms: 100, habit: None })]).unwrap();
+        archive.write(&[Record::Visit(Visit { key: "kitty".into(), start: 500, end: 600, active_ms: 100, habit: None, ..Default::default() })]).unwrap();
         let laptop = "0199b4c1-0000-7000-8000-000000000001";
         let rows: Vec<(String, Record)> =
             one_of_each(0).into_iter().enumerate().map(|(i, r)| (format!("{laptop}:x:{i}"), r)).collect();
@@ -749,7 +796,7 @@ mod tests {
     #[test]
     fn queries_read_one_device_or_all() {
         let mut archive = Archive::in_memory(&State::default());
-        archive.write(&[Record::Visit(Visit { key: "kitty".into(), start: 50, end: 60, active_ms: 10, habit: None })]).unwrap();
+        archive.write(&[Record::Visit(Visit { key: "kitty".into(), start: 50, end: 60, active_ms: 10, habit: None, ..Default::default() })]).unwrap();
         archive.write(&[Record::Afk(Afk { start: 70, end: 80, reason: AfkReason::Idle })]).unwrap();
         let laptop = "0199b4c1-0000-7000-8000-000000000001";
         let rows: Vec<(String, Record)> =

@@ -85,10 +85,22 @@ schedule = [
 # "term:btop" = "btop"
 #
 # Categories group screen time (`g` in the Insights pane, `hf apps
-# --by-category`); set them with `c` there or `hf category`.
+# --by-category`, the sunburst in `hf web`); set them with `c` there or
+# `hf category`. A category can have subcategories: "Media/Video".
 # [app_categories]
-# steam_app_275850 = "Games"
-# "site:www.youtube.com" = "Video"
+# steam_app_275850 = "Media/Games"
+# "site:www.youtube.com" = "Media/Video"
+#
+# Rules categorize the rest by pattern (regex, ignoring case): `match` on the
+# app id, site:… or term:…, or its name; `tmux_session` on the tmux session a
+# terminal shows. A session rule beats [app_categories], which beats `match`.
+# [[category_rules]]
+# category = "Media/Video"
+# match = "youtube|twitch|plex|vlc"
+#
+# [[category_rules]]
+# category = "Work/Programming/habitfocus"
+# tmux_session = "habitfocus"
 
 # ---- Habits -------------------------------------------------------------
 # The timer only runs while a window matching `allow` is focused and you're
