@@ -100,6 +100,8 @@ td.bar { width: 30%; min-width: 80px; }
 .log .day:first-child { margin-top: 0; }
 .log .row { display: grid; grid-template-columns: 6ch 2ch 1fr; gap: 8px; }
 .empty { color: var(--dim); padding: 8px 0; }
+.devices { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.any-screen { margin-top: 8px; }
 #tip {
   position: fixed; pointer-events: none; z-index: 10; display: none; max-width: 340px;
   background: var(--panel); border: 1px solid var(--border); padding: 6px 8px; box-shadow: 0 4px 16px rgb(0 0 0 / .25);
@@ -116,7 +118,8 @@ td.bar { width: 30%; min-width: 80px; }
   <b>habitfocus</b>
   <span class="dim" id="clock"></span>
   <span id="session"></span>
-  <span class="right" id="conn"><span class="dim">○ connecting…</span></span>
+  <span class="right" id="sync"></span>
+  <span id="conn"><span class="dim">○ connecting…</span></span>
 </header>
 <nav id="tabs"></nav>
 <main id="main"></main>
@@ -154,6 +157,9 @@ const ui = {
   filter: "",
   selected: null,      // row label; null is the total
   sort: ["total", -1],
+  // Timeline and screen time: null is this device, else a synced device's
+  // id or "all".
+  device: null,
   // Log
   logFilter: "",
   data: {},            // last response per view
@@ -167,6 +173,58 @@ async function api(cmd, params = {}) {
   if (!res.ok || !body.ok) throw new Error(body.error || `${res.status} ${res.statusText}`);
   if (body.snapshot) setSnapshot(body.snapshot);
   return body;
+}
+
+// ---- devices --------------------------------------------------------------------
+
+const ALL_DEVICES = "all";
+
+/** What Timeline and Screen time can show, in the order `v` steps through:
+    this device, the synced devices, all of them. Only this device without sync. */
+function deviceViews() {
+  const sync = ui.snapshot?.sync;
+  if (!sync?.devices?.length) return [{ id: null, name: "this device" }];
+  return [
+    { id: null, name: `${sync.device} (this device)` },
+    ...sync.devices.map(d => ({ id: d.id, name: d.name })),
+    { id: ALL_DEVICES, name: "all devices" },
+  ];
+}
+const deviceName = () => (deviceViews().find(d => d.id === ui.device) ?? deviceViews()[0]).name;
+const deviceParam = () => (ui.device ? { device: ui.device } : {});
+
+/** The device row of Timeline and Screen time, once there are others. */
+function deviceControls() {
+  const views = deviceViews();
+  if (views.length < 2) return "";
+  return `<span class="devices"><span class="dim">device</span> ${views.map(d =>
+    `<button class="ctl ${d.id === ui.device ? "on" : ""}" data-device="${esc(d.id ?? "")}">${esc(d.name)}</button>`).join(" ")}</span>`;
+}
+/** " · laptop" for panel titles, once there are other devices. */
+const deviceSuffix = () => (deviceViews().length > 1 ? ` · ${esc(deviceName())}` : "");
+
+function setDevice(id) {
+  ui.device = id || null;
+  ui.selected = null;
+  renderTabs();
+  load();
+}
+
+/** How sync goes, in a few words, with its color; like the TUI. */
+function syncStatus(sync) {
+  if (sync.signed_out) return ["signed out of sync", "yellow"];
+  if (sync.reachable === false) return ["sync server unreachable", "red"];
+  if (sync.syncing) return ["syncing…", "cyan"];
+  if (sync.error) return ["sync failed", "red"];
+  if (sync.last_sync_ms) return [`synced ${ago(sync.last_sync_ms)}`, "green"];
+  return ["waiting to sync", "dim"];
+}
+function ago(ms) {
+  const minutes = Math.floor((Date.now() - ms) / 60e3);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  if (minutes < 24 * 60) return `${Math.floor(minutes / 60)} h ago`;
+  return new Date(ms).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
 // ---- formatting ---------------------------------------------------------------
@@ -313,7 +371,15 @@ function columnTip(title, parts, habits = new Set()) {
 // ---- header / footer ----------------------------------------------------------
 
 function setSnapshot(s) {
+  const devicesBefore = deviceViews().length;
   ui.snapshot = s;
+  // The device shown was signed out: back to this one.
+  if (ui.device && !deviceViews().some(d => d.id === ui.device)) {
+    ui.device = null;
+    setTimeout(load);
+  }
+  // Devices came or went: the keys change (v).
+  if (deviceViews().length !== devicesBefore) renderTabs();
   setConnected(true);
 }
 function setConnected(ok, error) {
@@ -326,6 +392,17 @@ function setConnected(ok, error) {
 }
 function renderHeader() {
   const s = ui.snapshot;
+  const sync = s?.sync;
+  const syncEl = document.getElementById("sync");
+  if (sync) {
+    const [text, color] = syncStatus(sync);
+    const others = sync.devices.length ? sync.devices.map(d => d.name).join(", ") : "no other devices yet";
+    const title = `${sync.username} on ${sync.server}\nthis device: ${sync.device} · others: ${others}`
+      + (sync.error ? `\n${sync.error}` : "");
+    syncEl.innerHTML = `<span class="${color}" title="${esc(title)}">⇅ ${esc(text)}</span>`;
+  } else {
+    syncEl.innerHTML = "";
+  }
   document.getElementById("clock").textContent =
     new Date().toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hour12: false });
   const el = document.getElementById("session");
@@ -347,6 +424,7 @@ function renderTabs() {
     habits: [],
     log: [["f", "filter"]],
   }[ui.view];
+  if ((ui.view === "timeline" || ui.view === "screen") && deviceViews().length > 1) keys.push(["v", "device"]);
   document.getElementById("keys").innerHTML = [["1-4", "views"], ...keys, ["r", "refresh"]]
     .map(([k, l]) => `<span><kbd>${k}</kbd> ${l}</span>`).join("");
 }
@@ -381,8 +459,8 @@ async function load() {
 
 function fetchView(view) {
   switch (view) {
-    case "timeline": return api("timeline", { day_offset: ui.offset });
-    case "screen": return api("app_stats", { days: ui.days });
+    case "timeline": return api("timeline", { day_offset: ui.offset, ...deviceParam() });
+    case "screen": return api("app_stats", { days: ui.days, ...deviceParam() });
     case "habits": return api("stats", { days: 371 });
     case "log": return api("events", { limit: 2000 });
   }
@@ -439,20 +517,24 @@ function renderTimeline({ timeline, breakdown }) {
       <button class="ctl" data-act="prev" ${timeline.more_before ? "" : "disabled"} title="[">◀</button>
       <b>${esc(relDay(timeline.offset, timeline.date))}</b>
       <button class="ctl" data-act="next" ${timeline.offset ? "" : "disabled"} title="]">▶</button>
-      <span class="dim">${dur(active)} on screen · ${visits.length} visits${afk.length ? ` · ${dur(away)} away` : ""}</span>
+      <span class="dim">${dur(active)} on screen${ui.device === ALL_DEVICES ? " (summed over devices)" : ""} · ${visits.length} visits${afk.length ? ` · ${dur(away)} away` : ""}</span>
       <span style="margin-left:auto"><button class="ctl ${ui.fit ? "on" : ""}" data-act="fit">fit</button>
       <button class="ctl ${ui.fit ? "" : "on"}" data-act="whole">24h</button></span>
       <span><button class="ctl ${ui.byApp ? "" : "on"}" data-act="lanes-label">by habit/category</button>
       <button class="ctl ${ui.byApp ? "on" : ""}" data-act="lanes-app">by app</button></span>
+      ${deviceControls()}
     </div>`;
+  const noAfk = ui.device === ALL_DEVICES
+    ? "<span>no AFK for all devices together: away from one isn't away from all</span>"
+    : "<span>no AFK recorded on this day</span>";
 
   main.innerHTML = `
-    <div class="panel"><span class="title">Day</span>${nav}</div>
+    <div class="panel"><span class="title">Day<span class="dim">${deviceSuffix()}</span></span>${nav}</div>
     <div class="panel"><span class="title">Hours <span class="dim">· on screen per hour</span></span>
       ${hoursOfDay(timeline, breakdown, pal, habits)}${legend(pal, habits)}</div>
     <div class="panel"><span class="title">Timeline <span class="dim">· ${ui.byApp ? "per app, colored by what it counted as" : "what the time went to"}</span></span>
       ${visits.length || afk.length ? `<div class="scroll">${lanesChart(timeline, ordered, pal)}</div>
-        <div class="legend dim">${afk.length ? '<span><i class="sw idle"></i>AFK: idle</span><span><i class="sw asleep"></i>AFK: asleep (suspended)</span><span>shaded across the lanes too</span>' : "<span>no AFK recorded on this day</span>"}</div>`
+        <div class="legend dim">${afk.length ? '<span><i class="sw idle"></i>AFK: idle</span><span><i class="sw asleep"></i>AFK: asleep (suspended)</span><span>shaded across the lanes too</span>' : noAfk}</div>`
         : '<div class="empty">Nothing recorded on this day.</div>'}</div>`;
 }
 
@@ -601,7 +683,7 @@ function addRow(into, r) {
   into.keys.push(...r.keys);
 }
 
-function renderScreen({ app_stats: apps = [], breakdown }) {
+function renderScreen({ app_stats: apps = [], breakdown, wall_clock: clock }) {
   const rows = usageRows(apps);
   const total = { key: null, label: ui.filter ? "All shown" : ui.byCategory ? "All categories" : "All apps", today: 0, total: 0, longest: 0, hours: [], days: [], keys: [] };
   rows.forEach(r => addRow(total, r));
@@ -628,7 +710,13 @@ function renderScreen({ app_stats: apps = [], breakdown }) {
       <span><button class="ctl ${ui.byCategory ? "" : "on"}" data-act="apps">apps</button>
       <button class="ctl ${ui.byCategory ? "on" : ""}" data-act="categories">categories</button></span>
       <input class="ctl" id="filter" placeholder="f filter…" value="${esc(ui.filter)}" autocomplete="off" spellcheck="false">
+      ${deviceControls()}
     </div>`;
+  // All devices: the table sums them; this counts time at two screens once.
+  const anyScreen = clock
+    ? `<div class="any-screen"><b>${dur(clock.today_ms)}</b> today · <b>${dur(clock.total_ms)}</b> ${ui.days === 1 ? "" : `in ${ui.days} days `}at any screen
+        <span class="dim">· devices used at the same time count once here; the table sums them</span></div>`
+    : "";
 
   // Hours: stacked by what the time went to for the total, one series for a row.
   const shown = new Set(rows.flatMap(r => r.keys));
@@ -636,7 +724,7 @@ function renderScreen({ app_stats: apps = [], breakdown }) {
   const daysPanel = ui.days > 1 ? perDay(sel ?? total) : "";
 
   main.innerHTML = `
-    <div class="panel"><span class="title">Screen time</span>${controls}
+    <div class="panel"><span class="title">Screen time<span class="dim">${deviceSuffix()}</span></span>${controls}${anyScreen}
       <div class="table-box"><table><thead><tr>${th}</tr></thead>
       <tbody>${tr(total, true)}${rows.map(r => tr(r, false)).join("")}</tbody></table></div>
       ${rows.length ? "" : '<div class="empty">Nothing matches.</div>'}</div>
@@ -778,8 +866,9 @@ function renderLog({ events = [] }) {
 // ---- input --------------------------------------------------------------------
 
 main.addEventListener("click", e => {
-  const t = e.target.closest("[data-act],[data-days],[data-sort],tr[data-row]");
+  const t = e.target.closest("[data-act],[data-days],[data-sort],[data-device],tr[data-row]");
   if (!t) return;
+  if (t.dataset.device !== undefined) return setDevice(t.dataset.device);
   if (t.dataset.days) { ui.days = Number(t.dataset.days); return load(); }
   if (t.dataset.sort) {
     const c = t.dataset.sort;
@@ -825,6 +914,12 @@ document.addEventListener("keydown", e => {
   const n = Number(e.key);
   if (n >= 1 && n <= VIEWS.length) return show(VIEWS[n - 1][0]);
   if (e.key === "r") return load();
+  if (e.key === "v" && (ui.view === "timeline" || ui.view === "screen")) {
+    const views = deviceViews();
+    if (views.length < 2) return;
+    const at = views.findIndex(d => d.id === ui.device);
+    return setDevice(views[(at + 1) % views.length].id);
+  }
   if (ui.view === "timeline") {
     if (e.key === "[") return stepDay(1);
     if (e.key === "]") return stepDay(-1);

@@ -303,7 +303,8 @@ Keep the sync key safe: without it, nobody (you included) can read the data on t
 
 Once other devices have synced, the TUI shows how sync goes in its header and sidebar, and `v` in Insights steps
 through the devices: this one, each other device, and **all devices**. All devices adds the time *at any screen*:
-two devices used at the same time count once there, while the table sums them. On the command line, `hf apps
+two devices used at the same time count once there, while the table sums them. `hf web` has the same device row
+(and `v`) on Timeline and Screen time, and the sync status in its header. On the command line, `hf apps
 --device <name>` or `--device all` does the same. Habits and streaks still count this device only. Without sync
 nothing of this shows; the settings (`o`) explain how to set it up.
 

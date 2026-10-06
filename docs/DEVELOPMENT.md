@@ -549,6 +549,11 @@ are a fixed categorical order assigned by use, the rest folded into "Other". The
 (`Engine::day_timeline`: the archive's visits and AFK stretches plus the ones in progress, cut to the logical day
 and labelled).
 
+With sync, the header shows `snapshot.sync` and Timeline and Screen time get a device row (`deviceViews()`, `v`):
+the views pass `device` (an id or `all`) to `timeline` and `app_stats`; `api_request` only lets ids through that
+are letters, digits and hyphens. Screen time shows `Response.wall_clock` for all devices. Without other devices
+none of it appears.
+
 ### Native host (`native_host.rs`)
 
 Browsers start `hf` directly with their own arguments (Chrome: `chrome-extension://ID/`; Firefox: the manifest path
