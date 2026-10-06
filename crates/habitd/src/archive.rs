@@ -3,16 +3,20 @@
 //! engine needs to run; this is for looking back.
 //!
 //! Only habitd opens the database. Clients ask through the socket.
+//!
+//! Records of other devices (pulled by sync) live in the same tables with
+//! their `device` set; this device's own rows have `device` NULL. Every query
+//! for the engine and the views reads only this device's rows.
 
 use habit_core::archive::{Afk, AfkReason, Record, Visit};
-use habit_core::state::{Event, EventKind, Outcome, State};
-use rusqlite::{params, Connection};
+use habit_core::state::{Event, EventKind, HistoryEntry, Outcome, State};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::path::Path;
 
 /// Schema version, stored in `PRAGMA user_version`.
-const VERSION: i64 = 3;
+const VERSION: i64 = 4;
 
 const SCHEMA: &str = "
     CREATE TABLE events (
@@ -55,8 +59,92 @@ const AFK_SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS afk_start ON afk (start_ms);
 ";
 
+/// Sync (schema 4): who wrote a row, and this installation's identity.
+///
+/// `device` is NULL for this device's rows and the id of the other device for
+/// pulled ones. `uid` identifies a pulled row across devices
+/// (`<device>:<table>:<rowid there>`), so pulling it twice inserts it once.
+/// This device's rows need no stored uid: theirs is derived from the rowid.
+const SYNC_SCHEMA: &str = "
+    ALTER TABLE events ADD COLUMN device TEXT;
+    ALTER TABLE events ADD COLUMN uid TEXT;
+    CREATE UNIQUE INDEX events_uid ON events (uid);
+    ALTER TABLE sessions ADD COLUMN device TEXT;
+    ALTER TABLE sessions ADD COLUMN uid TEXT;
+    CREATE UNIQUE INDEX sessions_uid ON sessions (uid);
+    ALTER TABLE visits ADD COLUMN device TEXT;
+    ALTER TABLE visits ADD COLUMN uid TEXT;
+    CREATE UNIQUE INDEX visits_uid ON visits (uid);
+    ALTER TABLE afk ADD COLUMN device TEXT;
+    ALTER TABLE afk ADD COLUMN uid TEXT;
+    CREATE UNIQUE INDEX afk_uid ON afk (uid);
+
+    -- One row: this installation. The id is its `host` on the sync server.
+    CREATE TABLE device (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL
+    );
+    -- The other devices of the sync account.
+    CREATE TABLE devices (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        last_seen_ms INTEGER
+    );
+    -- Sync bookkeeping: cursors per table and device.
+    CREATE TABLE sync_state (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+";
+
+/// This installation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Device {
+    /// A random UUID, created with the archive.
+    pub id: String,
+    /// The hostname at the time.
+    pub name: String,
+}
+
+/// The record tables. Each is one log per device on the sync server.
+#[allow(dead_code)] // Used by sync, which comes next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Table {
+    Events,
+    Sessions,
+    Visits,
+    Afk,
+}
+
+#[allow(dead_code)] // Used by sync, which comes next.
+impl Table {
+    pub const ALL: [Table; 4] = [Table::Events, Table::Sessions, Table::Visits, Table::Afk];
+
+    /// The SQL table, also the record tag on the sync server.
+    pub fn name(self) -> &'static str {
+        match self {
+            Table::Events => "events",
+            Table::Sessions => "sessions",
+            Table::Visits => "visits",
+            Table::Afk => "afk",
+        }
+    }
+}
+
+/// A row of this device, as sync sends it.
+#[allow(dead_code)] // Used by sync, which comes next.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalRow {
+    pub rowid: i64,
+    /// Unique across devices: `<device>:<table>:<rowid>`.
+    pub uid: String,
+    pub record: Record,
+}
+
 pub struct Archive {
     conn: Connection,
+    #[allow(dead_code)] // Used by sync, which comes next.
+    device: Device,
 }
 
 /// A serde unit enum as its bare name, e.g. `credit_expired`.
@@ -75,53 +163,20 @@ impl Archive {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        let mut archive = Archive { conn };
-        archive.migrate(state)?;
-        Ok(archive)
+        let device = migrate(&mut conn, state)?;
+        Ok(Archive { conn, device })
     }
 
     #[cfg(test)]
     fn in_memory(state: &State) -> Archive {
-        let mut archive = Archive { conn: Connection::open_in_memory().unwrap() };
-        archive.migrate(state).unwrap();
-        archive
+        let mut conn = Connection::open_in_memory().unwrap();
+        let device = migrate(&mut conn, state).unwrap();
+        Archive { conn, device }
     }
 
-    fn migrate(&mut self, state: &State) -> anyhow::Result<()> {
-        let version: i64 = self.conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > VERSION {
-            anyhow::bail!("history.db is from a newer habitd (schema {version}, this one knows {VERSION})");
-        }
-        if version == 1 || version == 2 {
-            let tx = self.conn.transaction()?;
-            if version == 1 {
-                // Visits learned which habit they counted towards.
-                tx.execute_batch("ALTER TABLE visits ADD COLUMN habit TEXT")?;
-            }
-            tx.execute_batch(AFK_SCHEMA)?;
-            tx.pragma_update(None, "user_version", VERSION)?;
-            tx.commit()?;
-        }
-        if version == 0 {
-            let tx = self.conn.transaction()?;
-            tx.execute_batch(SCHEMA)?;
-            tx.execute_batch(AFK_SCHEMA)?;
-            let imported: Vec<Record> = state
-                .events
-                .iter()
-                .cloned()
-                .map(Record::Event)
-                .chain(state.history.iter().cloned().map(Record::Session))
-                .collect();
-            insert(&tx, &imported)?;
-            tx.pragma_update(None, "user_version", VERSION)?;
-            tx.commit()?;
-        }
-        Ok(())
-    }
 
     /// Writes a batch of records in one transaction.
     pub fn write(&mut self, records: &[Record]) -> anyhow::Result<()> {
@@ -139,7 +194,8 @@ impl Archive {
     pub fn events(&self, limit: usize) -> anyhow::Result<Vec<Event>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT at_ms, kind, subject, amount, text FROM events ORDER BY at_ms DESC, id DESC LIMIT ?1")?;
+            .prepare("SELECT at_ms, kind, subject, amount, text FROM events WHERE device IS NULL
+             ORDER BY at_ms DESC, id DESC LIMIT ?1")?;
         let rows = stmt.query_map(params![limit as i64], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get(2)?, row.get::<_, i64>(3)?, row.get(4)?))
         })?;
@@ -157,7 +213,7 @@ impl Archive {
     pub fn visits(&self, from: u64, to: u64) -> anyhow::Result<Vec<Visit>> {
         let mut stmt = self.conn.prepare(
             "SELECT key, start_ms, end_ms, active_ms, habit FROM visits
-             WHERE end_ms > ?1 AND start_ms < ?2 ORDER BY start_ms, id",
+             WHERE device IS NULL AND end_ms > ?1 AND start_ms < ?2 ORDER BY start_ms, id",
         )?;
         let rows = stmt.query_map(params![from as i64, to as i64], |row| {
             Ok(Visit {
@@ -172,12 +228,134 @@ impl Archive {
     }
 }
 
+/// What sync needs: this device's rows by cursor, other devices' rows by uid.
+#[allow(dead_code)] // Used by sync, which comes next.
+impl Archive {
+    /// This installation.
+    pub fn device(&self) -> &Device {
+        &self.device
+    }
+
+    /// Stores records another device wrote, keyed by their uid; ones already
+    /// here are skipped. Returns how many were new.
+    pub fn insert_remote(&mut self, device: &str, rows: &[(String, Record)]) -> anyhow::Result<usize> {
+        let tx = self.conn.transaction()?;
+        let mut added = 0;
+        for (uid, record) in rows {
+            added += insert_row(&tx, record, Some((device, uid)))?;
+        }
+        tx.commit()?;
+        Ok(added)
+    }
+
+    /// This device's rows of `table` after rowid `after`, oldest first.
+    pub fn local_rows(&self, table: Table, after: i64, limit: usize) -> anyhow::Result<Vec<LocalRow>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let row = |rowid: i64, record: Record| LocalRow {
+            rowid,
+            uid: format!("{}:{}:{rowid}", self.device.id, table.name()),
+            record,
+        };
+        let mut rows = Vec::new();
+        match table {
+            Table::Events => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, at_ms, kind, subject, amount, text FROM events
+                     WHERE device IS NULL AND id > ?1 ORDER BY id LIMIT ?2",
+                )?;
+                let mut query = stmt.query(params![after, limit])?;
+                while let Some(r) = query.next()? {
+                    // Kinds this habitd doesn't know can't come from here.
+                    let Some(kind) = from_name::<EventKind>(&r.get::<_, String>(2)?) else { continue };
+                    let event =
+                        Event { at: r.get::<_, i64>(1)? as u64, kind, subject: r.get(3)?, amount: r.get::<_, i64>(4)? as u64, text: r.get(5)? };
+                    rows.push(row(r.get(0)?, Record::Event(event)));
+                }
+            }
+            Table::Sessions => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, habit, started_ms, finished_ms, focused_ms, outcome FROM sessions
+                     WHERE device IS NULL AND id > ?1 ORDER BY id LIMIT ?2",
+                )?;
+                let mut query = stmt.query(params![after, limit])?;
+                while let Some(r) = query.next()? {
+                    let Some(outcome) = from_name::<Outcome>(&r.get::<_, String>(5)?) else { continue };
+                    let session = HistoryEntry {
+                        habit: r.get(1)?,
+                        started_at: r.get::<_, i64>(2)? as u64,
+                        finished_at: r.get::<_, i64>(3)? as u64,
+                        focused_ms: r.get::<_, i64>(4)? as u64,
+                        outcome,
+                    };
+                    rows.push(row(r.get(0)?, Record::Session(session)));
+                }
+            }
+            Table::Visits => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, key, start_ms, end_ms, active_ms, habit FROM visits
+                     WHERE device IS NULL AND id > ?1 ORDER BY id LIMIT ?2",
+                )?;
+                let mut query = stmt.query(params![after, limit])?;
+                while let Some(r) = query.next()? {
+                    let visit = Visit {
+                        key: r.get(1)?,
+                        start: r.get::<_, i64>(2)? as u64,
+                        end: r.get::<_, i64>(3)? as u64,
+                        active_ms: r.get::<_, i64>(4)? as u64,
+                        habit: r.get(5)?,
+                    };
+                    rows.push(row(r.get(0)?, Record::Visit(visit)));
+                }
+            }
+            Table::Afk => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, start_ms, end_ms, reason FROM afk WHERE device IS NULL AND id > ?1 ORDER BY id LIMIT ?2",
+                )?;
+                let mut query = stmt.query(params![after, limit])?;
+                while let Some(r) = query.next()? {
+                    let Some(reason) = from_name::<AfkReason>(&r.get::<_, String>(3)?) else { continue };
+                    let afk = Afk { start: r.get::<_, i64>(1)? as u64, end: r.get::<_, i64>(2)? as u64, reason };
+                    rows.push(row(r.get(0)?, Record::Afk(afk)));
+                }
+            }
+        }
+        Ok(rows)
+    }
+
+    /// A value of the sync bookkeeping, e.g. a cursor.
+    pub fn sync_value(&self, key: &str) -> anyhow::Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM sync_state WHERE key = ?1", params![key], |row| row.get(0))
+            .optional()?)
+    }
+
+    pub fn set_sync_value(&mut self, key: &str, value: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO sync_state (key, value) VALUES (?1, ?2) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// Remembers another device of the sync account.
+    pub fn set_remote_device(&mut self, id: &str, name: &str, last_seen_ms: Option<u64>) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO devices (id, name, last_seen_ms) VALUES (?1, ?2, ?3)
+             ON CONFLICT (id) DO UPDATE SET name = excluded.name, last_seen_ms = excluded.last_seen_ms",
+            params![id, name, last_seen_ms.map(|ms| ms as i64)],
+        )?;
+        Ok(())
+    }
+}
+
 impl Archive {
     /// Time away overlapping `from`..`to`, oldest first. Reasons this habitd
     /// doesn't know are skipped.
     pub fn afk(&self, from: u64, to: u64) -> anyhow::Result<Vec<Afk>> {
         let mut stmt = self.conn.prepare(
-            "SELECT start_ms, end_ms, reason FROM afk WHERE end_ms > ?1 AND start_ms < ?2 ORDER BY start_ms, id",
+            "SELECT start_ms, end_ms, reason FROM afk
+             WHERE device IS NULL AND end_ms > ?1 AND start_ms < ?2 ORDER BY start_ms, id",
         )?;
         let rows = stmt.query_map(params![from as i64, to as i64], |row| {
             Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64, row.get::<_, String>(2)?))
@@ -195,51 +373,136 @@ impl Archive {
     /// When the first visit was recorded, if any.
     pub fn first_visit(&self) -> anyhow::Result<Option<u64>> {
         let first: Option<i64> =
-            self.conn.query_row("SELECT MIN(start_ms) FROM visits", [], |row| row.get(0))?;
+            self.conn.query_row("SELECT MIN(start_ms) FROM visits WHERE device IS NULL", [], |row| row.get(0))?;
         Ok(first.map(|ms| ms as u64))
     }
 }
 
-fn insert(conn: &Connection, records: &[Record]) -> rusqlite::Result<()> {
-    let mut event = conn.prepare_cached(
-        "INSERT INTO events (at_ms, kind, subject, amount, text) VALUES (?1, ?2, ?3, ?4, ?5)",
-    )?;
-    let mut session = conn.prepare_cached(
-        "INSERT INTO sessions (habit, started_ms, finished_ms, focused_ms, outcome) VALUES (?1, ?2, ?3, ?4, ?5)",
-    )?;
-    let mut visit = conn.prepare_cached(
-        "INSERT INTO visits (key, start_ms, end_ms, active_ms, habit) VALUES (?1, ?2, ?3, ?4, ?5)",
-    )?;
-    let mut afk = conn.prepare_cached("INSERT INTO afk (start_ms, end_ms, reason) VALUES (?1, ?2, ?3)")?;
-    for record in records {
-        match record {
-            Record::Event(e) => {
-                event.execute(params![e.at as i64, name(&e.kind), e.subject, e.amount as i64, e.text])?;
-            }
-            Record::Session(s) => {
-                session.execute(params![
-                    s.habit,
-                    s.started_at as i64,
-                    s.finished_at as i64,
-                    s.focused_ms as i64,
-                    name::<Outcome>(&s.outcome)
-                ])?;
-            }
-            Record::Visit(v) => {
-                visit.execute(params![v.key, v.start as i64, v.end as i64, v.active_ms as i64, v.habit])?;
-            }
-            Record::Afk(a) => {
-                afk.execute(params![a.start as i64, a.end as i64, name(&a.reason)])?;
-            }
+/// Brings the schema up to date and returns this installation, creating
+/// its identity the first time.
+fn migrate(conn: &mut Connection, state: &State) -> anyhow::Result<Device> {
+    let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version > VERSION {
+        anyhow::bail!("history.db is from a newer habitd (schema {version}, this one knows {VERSION})");
+    }
+    let tx = conn.transaction()?;
+    if version == 0 {
+        tx.execute_batch(SCHEMA)?;
+    }
+    if version == 1 {
+        // Visits learned which habit they counted towards.
+        tx.execute_batch("ALTER TABLE visits ADD COLUMN habit TEXT")?;
+    }
+    if version < 3 {
+        tx.execute_batch(AFK_SCHEMA)?;
+    }
+    if version < 4 {
+        tx.execute_batch(SYNC_SCHEMA)?;
+    }
+    if version == 0 {
+        // A new archive starts with the history still in state.json.
+        let imported: Vec<Record> = state
+            .events
+            .iter()
+            .cloned()
+            .map(Record::Event)
+            .chain(state.history.iter().cloned().map(Record::Session))
+            .collect();
+        insert(&tx, &imported)?;
+    }
+    if version < VERSION {
+        tx.pragma_update(None, "user_version", VERSION)?;
+    }
+    let existing = tx.query_row("SELECT id, name FROM device", [], |r| Ok(Device { id: r.get(0)?, name: r.get(1)? })).optional()?;
+    let device = match existing {
+        Some(device) => device,
+        None => {
+            let device = Device { id: uuid::Uuid::new_v4().to_string(), name: hostname() };
+            tx.execute("INSERT INTO device (id, name) VALUES (?1, ?2)", params![device.id, device.name])?;
+            device
         }
+    };
+    tx.commit()?;
+    Ok(device)
+}
+
+fn hostname() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|name| name.trim().to_string())
+        .ok()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "habitfocus".to_string())
+}
+
+/// Writes this device's records.
+fn insert(conn: &Connection, records: &[Record]) -> rusqlite::Result<()> {
+    for record in records {
+        insert_row(conn, record, None)?;
     }
     Ok(())
+}
+
+/// Writes one record: this device's (`origin` None) or another device's,
+/// skipped when its uid is already here. Returns the rows written.
+fn insert_row(conn: &Connection, record: &Record, origin: Option<(&str, &str)>) -> rusqlite::Result<usize> {
+    let (device, uid) = origin.unzip();
+    let verb = if origin.is_some() { "INSERT OR IGNORE" } else { "INSERT" };
+    match record {
+        Record::Event(e) => conn
+            .prepare_cached(&format!(
+                "{verb} INTO events (at_ms, kind, subject, amount, text, device, uid) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+            ))?
+            .execute(params![e.at as i64, name(&e.kind), e.subject, e.amount as i64, e.text, device, uid]),
+        Record::Session(s) => conn
+            .prepare_cached(&format!(
+                "{verb} INTO sessions (habit, started_ms, finished_ms, focused_ms, outcome, device, uid)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+            ))?
+            .execute(params![
+                s.habit,
+                s.started_at as i64,
+                s.finished_at as i64,
+                s.focused_ms as i64,
+                name::<Outcome>(&s.outcome),
+                device,
+                uid
+            ]),
+        Record::Visit(v) => conn
+            .prepare_cached(&format!(
+                "{verb} INTO visits (key, start_ms, end_ms, active_ms, habit, device, uid) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+            ))?
+            .execute(params![v.key, v.start as i64, v.end as i64, v.active_ms as i64, v.habit, device, uid]),
+        Record::Afk(a) => conn
+            .prepare_cached(&format!(
+                "{verb} INTO afk (start_ms, end_ms, reason, device, uid) VALUES (?1, ?2, ?3, ?4, ?5)"
+            ))?
+            .execute(params![a.start as i64, a.end as i64, name(&a.reason), device, uid]),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use habit_core::state::HistoryEntry;
+
+    /// A database as an older habitd left it, at schema `version` (1 to 3).
+    fn old_database(version: i64) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        if version == 1 {
+            conn.execute_batch("ALTER TABLE visits DROP COLUMN habit").unwrap();
+        }
+        if version >= 3 {
+            conn.execute_batch(AFK_SCHEMA).unwrap();
+        }
+        conn.pragma_update(None, "user_version", version).unwrap();
+        conn
+    }
+
+    fn migrated(mut conn: Connection) -> Archive {
+        let device = migrate(&mut conn, &State::default()).unwrap();
+        Archive { conn, device }
+    }
 
     fn event(at: u64, text: &str) -> Event {
         Event { at, kind: EventKind::CreditEarned, subject: Some("social".into()), amount: 60_000, text: text.into() }
@@ -260,7 +523,7 @@ mod tests {
         };
         let mut archive = Archive::in_memory(&state);
         // A second migrate (the next start) doesn't import again.
-        archive.migrate(&state).unwrap();
+        migrate(&mut archive.conn, &state).unwrap();
         archive.write(&[Record::Event(event(3, "new"))]).unwrap();
 
         let texts: Vec<String> = archive.events(10).unwrap().into_iter().map(|e| e.text).collect();
@@ -284,11 +547,9 @@ mod tests {
         assert_eq!(Archive::in_memory(&State::default()).first_visit().unwrap(), None);
 
         // A database from before visits knew about habits keeps its rows.
-        let old = Archive::in_memory(&State::default());
-        old.conn.execute_batch("DROP TABLE visits; CREATE TABLE visits (id INTEGER PRIMARY KEY, key TEXT NOT NULL, start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL, active_ms INTEGER NOT NULL); INSERT INTO visits (key, start_ms, end_ms, active_ms) VALUES ('kitty', 0, 100, 100)").unwrap();
-        old.conn.pragma_update(None, "user_version", 1).unwrap();
-        let mut old = Archive { conn: old.conn };
-        old.migrate(&State::default()).unwrap();
+        let conn = old_database(1);
+        conn.execute("INSERT INTO visits (key, start_ms, end_ms, active_ms) VALUES ('kitty', 0, 100, 100)", []).unwrap();
+        let mut old = migrated(conn);
         let visits = old.visits(0, 1000).unwrap();
         assert_eq!((visits[0].key.as_str(), visits[0].habit.clone()), ("kitty", None));
         old.write(&[Record::Visit(Visit { key: "zed".into(), start: 0, end: 5, active_ms: 5, habit: Some("read".into()) })]).unwrap();
@@ -305,15 +566,114 @@ mod tests {
         assert_eq!(archive.afk(250, 400).unwrap()[0].reason, AfkReason::Asleep);
 
         // Schema 2 gains the table.
-        let old = Archive::in_memory(&State::default());
-        old.conn.execute_batch("DROP TABLE afk").unwrap();
-        old.conn.pragma_update(None, "user_version", 2).unwrap();
-        let mut old = Archive { conn: old.conn };
-        old.migrate(&State::default()).unwrap();
+        let mut old = migrated(old_database(2));
         old.write(&[afk(0, 10, AfkReason::Idle)]).unwrap();
         assert_eq!(old.afk(0, 10).unwrap().len(), 1);
         let version: i64 = old.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
         assert_eq!(version, VERSION);
+    }
+
+    fn one_of_each(at: u64) -> Vec<Record> {
+        vec![
+            Record::Event(event(at, "earned")),
+            Record::Session(HistoryEntry {
+                habit: "read".into(),
+                started_at: at,
+                finished_at: at + 10,
+                focused_ms: 10,
+                outcome: Outcome::Completed,
+            }),
+            Record::Visit(Visit { key: "site:example.org".into(), start: at, end: at + 5, active_ms: 5, habit: None }),
+            Record::Afk(Afk { start: at + 5, end: at + 9, reason: AfkReason::Asleep }),
+        ]
+    }
+
+    #[test]
+    fn schema_3_gains_sync_and_keeps_its_rows() {
+        let conn = old_database(3);
+        conn.execute("INSERT INTO visits (key, start_ms, end_ms, active_ms) VALUES ('kitty', 0, 100, 100)", []).unwrap();
+        conn.execute("INSERT INTO afk (start_ms, end_ms, reason) VALUES (100, 200, 'idle')", []).unwrap();
+        let archive = migrated(conn);
+        assert_eq!(archive.visits(0, 1000).unwrap()[0].key, "kitty");
+        assert_eq!(archive.afk(0, 1000).unwrap().len(), 1);
+        let version: i64 = archive.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(version, VERSION);
+        // Rows from before sync are this device's and go out with the first push.
+        let rows = archive.local_rows(Table::Visits, 0, 10).unwrap();
+        assert_eq!(rows[0].uid, format!("{}:visits:1", archive.device().id));
+    }
+
+    #[test]
+    fn the_device_is_created_once_and_kept() {
+        let dir = std::env::temp_dir().join(format!("habitfocus-archive-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("history.db");
+        let first = Archive::open(&path, &State::default()).unwrap().device().clone();
+        let again = Archive::open(&path, &State::default()).unwrap().device().clone();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(first, again);
+        assert!(uuid::Uuid::parse_str(&first.id).is_ok(), "{first:?}");
+        assert!(!first.name.is_empty());
+        assert_ne!(Archive::in_memory(&State::default()).device().id, first.id, "every archive is its own device");
+    }
+
+    #[test]
+    fn local_rows_come_by_cursor_with_their_uid() {
+        let mut archive = Archive::in_memory(&State::default());
+        archive.write(&one_of_each(0)).unwrap();
+        archive.write(&one_of_each(100)).unwrap();
+        let id = archive.device().id.clone();
+
+        // `one_of_each` is in the order of `Table::ALL`.
+        for (table, written) in Table::ALL.into_iter().zip(one_of_each(100)) {
+            let rows = archive.local_rows(table, 0, 10).unwrap();
+            assert_eq!(rows.iter().map(|r| r.rowid).collect::<Vec<_>>(), [1, 2], "{table:?}");
+            assert_eq!(rows[1].uid, format!("{id}:{}:2", table.name()));
+            assert_eq!(rows[1].record, written, "read back as written");
+        }
+        let after = archive.local_rows(Table::Visits, 1, 10).unwrap();
+        assert_eq!(after.iter().map(|r| r.rowid).collect::<Vec<_>>(), [2]);
+        assert_eq!(archive.local_rows(Table::Visits, 0, 1).unwrap().len(), 1, "limited");
+        assert!(archive.local_rows(Table::Visits, 2, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn remote_rows_are_stored_once_and_kept_out_of_this_devices_views() {
+        let mut archive = Archive::in_memory(&State::default());
+        archive.write(&[Record::Visit(Visit { key: "kitty".into(), start: 500, end: 600, active_ms: 100, habit: None })]).unwrap();
+        let laptop = "0199b4c1-0000-7000-8000-000000000001";
+        let rows: Vec<(String, Record)> =
+            one_of_each(0).into_iter().enumerate().map(|(i, r)| (format!("{laptop}:x:{i}"), r)).collect();
+        assert_eq!(archive.insert_remote(laptop, &rows).unwrap(), 4);
+        assert_eq!(archive.insert_remote(laptop, &rows).unwrap(), 0, "pulling again changes nothing");
+
+        assert_eq!(archive.visits(0, 1000).unwrap().iter().map(|v| v.key.as_str()).collect::<Vec<_>>(), ["kitty"]);
+        assert!(archive.events(10).unwrap().is_empty());
+        assert!(archive.afk(0, 1000).unwrap().is_empty());
+        assert_eq!(archive.first_visit().unwrap(), Some(500));
+        for table in Table::ALL {
+            let rows = archive.local_rows(table, 0, 10).unwrap();
+            assert!(rows.iter().all(|r| r.uid.starts_with(&archive.device().id)), "{table:?}: {rows:?}");
+        }
+        let stored: i64 = archive
+            .conn
+            .query_row("SELECT COUNT(*) FROM visits WHERE device = ?1", params![laptop], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, 1);
+    }
+
+    #[test]
+    fn sync_state_and_devices_are_kept() {
+        let mut archive = Archive::in_memory(&State::default());
+        assert_eq!(archive.sync_value("push:visits").unwrap(), None);
+        archive.set_sync_value("push:visits", "41").unwrap();
+        archive.set_sync_value("push:visits", "42").unwrap();
+        assert_eq!(archive.sync_value("push:visits").unwrap().as_deref(), Some("42"));
+
+        archive.set_remote_device("d1", "laptop", None).unwrap();
+        archive.set_remote_device("d1", "old laptop", Some(1234)).unwrap();
+        let row: (String, Option<i64>) =
+            archive.conn.query_row("SELECT name, last_seen_ms FROM devices", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(row, ("old laptop".to_string(), Some(1234)));
     }
 
     #[test]

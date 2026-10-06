@@ -305,6 +305,15 @@ version refuses to open) and imports state.json's events and history into a new 
 hourly breakdown). Schema 2 added the visits' habit column, schema 3 the `afk` table; `migrate` changes the database in place. If the database
 can't be opened habitd runs without it, logs why, and `app_stats` has no session or hour data.
 
+Schema 4 prepares multi-device sync (see `docs/SYNC_CONCEPT.md` on the `concept/sync` branch). The `device` table
+holds this installation's identity, a random UUID and the hostname, created once with the database; the UUID is the
+device's `host` on the sync server. Every record table has `device` and `uid` columns: NULL for this device's rows,
+the other device's id and the row's global uid (`<device>:<table>:<rowid there>`, unique) for rows pulled from it.
+All queries for the engine and the views read `device IS NULL` only, so pulled rows change nothing until views ask
+for them. For sync, `local_rows(table, after, limit)` reads this device's rows by rowid cursor with their uid,
+`insert_remote(device, rows)` stores another device's rows (`INSERT OR IGNORE` on the uid, so pulling twice is
+harmless), and `sync_state` / `devices` hold cursors and the account's other devices.
+
 ### Commitment lock (`lock.rs`)
 
 `state.lock` stores `until`, the config text in force (`baseline`), `end_requested_at`, `pending` changes and
@@ -528,7 +537,7 @@ MV3, one codebase for Firefox-family and Chromium browsers (the manifest has bot
 |---|---|
 | `~/.config/habitfocus/config.toml` | user config (`hf init` writes `contrib/config.example.toml`) |
 | `~/.local/state/habitfocus/state.json` | persisted `State` (written atomically via `.tmp` + rename) |
-| `~/.local/state/habitfocus/history.db` | archive: events, sessions, visits (SQLite, WAL mode; `hf paths` prints it) |
+| `~/.local/state/habitfocus/history.db` | archive: events, sessions, visits, afk, and this device's sync identity (SQLite, WAL mode; `hf paths` prints it) |
 | `$XDG_RUNTIME_DIR/habitfocus.sock` | daemon socket |
 | `~/.config/systemd/user/habitd.service` | from `contrib/habitd.service` |
 | `~/.mozilla/native-messaging-hosts/dev.habitfocus.host.json` (and `~/.zen`, Chromium dirs) | native host manifests |

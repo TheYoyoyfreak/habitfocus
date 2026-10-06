@@ -18,3 +18,4 @@ toml.workspace = true
 wayland-client.workspace = true
 wayland-protocols.workspace = true
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
