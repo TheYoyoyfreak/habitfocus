@@ -107,7 +107,6 @@ pub struct Device {
 }
 
 /// The record tables. Each is one log per device on the sync server.
-#[allow(dead_code)] // Used by sync, which comes next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Table {
     Events,
@@ -116,7 +115,6 @@ pub enum Table {
     Afk,
 }
 
-#[allow(dead_code)] // Used by sync, which comes next.
 impl Table {
     pub const ALL: [Table; 4] = [Table::Events, Table::Sessions, Table::Visits, Table::Afk];
 
@@ -131,8 +129,17 @@ impl Table {
     }
 }
 
+/// Another device of the sync account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteDevice {
+    pub id: String,
+    pub name: String,
+    pub last_seen_ms: Option<u64>,
+    /// Rows pulled from it.
+    pub rows: u64,
+}
+
 /// A row of this device, as sync sends it.
-#[allow(dead_code)] // Used by sync, which comes next.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalRow {
     pub rowid: i64,
@@ -143,8 +150,7 @@ pub struct LocalRow {
 
 pub struct Archive {
     conn: Connection,
-    #[allow(dead_code)] // Used by sync, which comes next.
-    device: Device,
+        device: Device,
 }
 
 /// A serde unit enum as its bare name, e.g. `credit_expired`.
@@ -166,12 +172,14 @@ impl Archive {
         let mut conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // The sync thread has a connection of its own.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let device = migrate(&mut conn, state)?;
         Ok(Archive { conn, device })
     }
 
     #[cfg(test)]
-    fn in_memory(state: &State) -> Archive {
+    pub(crate) fn in_memory(state: &State) -> Archive {
         let mut conn = Connection::open_in_memory().unwrap();
         let device = migrate(&mut conn, state).unwrap();
         Archive { conn, device }
@@ -229,7 +237,6 @@ impl Archive {
 }
 
 /// What sync needs: this device's rows by cursor, other devices' rows by uid.
-#[allow(dead_code)] // Used by sync, which comes next.
 impl Archive {
     /// This installation.
     pub fn device(&self) -> &Device {
@@ -338,6 +345,34 @@ impl Archive {
         Ok(())
     }
 
+    /// Forgets cursors and devices, for signing out. Pulled rows stay.
+    pub fn clear_sync_state(&mut self) -> anyhow::Result<()> {
+        self.conn.execute_batch("DELETE FROM sync_state; DELETE FROM devices;")?;
+        Ok(())
+    }
+
+    /// The other devices of the sync account with how many rows came from
+    /// each, by name.
+    pub fn remote_devices(&self) -> anyhow::Result<Vec<RemoteDevice>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, last_seen_ms,
+                (SELECT COUNT(*) FROM events WHERE device = devices.id)
+                + (SELECT COUNT(*) FROM sessions WHERE device = devices.id)
+                + (SELECT COUNT(*) FROM visits WHERE device = devices.id)
+                + (SELECT COUNT(*) FROM afk WHERE device = devices.id)
+             FROM devices ORDER BY name, id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(RemoteDevice {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                last_seen_ms: r.get::<_, Option<i64>>(2)?.map(|ms| ms as u64),
+                rows: r.get::<_, i64>(3)? as u64,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Remembers another device of the sync account.
     pub fn set_remote_device(&mut self, id: &str, name: &str, last_seen_ms: Option<u64>) -> anyhow::Result<()> {
         self.conn.execute(
@@ -375,6 +410,15 @@ impl Archive {
         let first: Option<i64> =
             self.conn.query_row("SELECT MIN(start_ms) FROM visits WHERE device IS NULL", [], |row| row.get(0))?;
         Ok(first.map(|ms| ms as u64))
+    }
+}
+
+#[cfg(test)]
+impl Archive {
+    /// Keys of the visits pulled from `device`, oldest first.
+    pub(crate) fn remote_visit_keys(&self, device: &str) -> Vec<String> {
+        let mut stmt = self.conn.prepare("SELECT key FROM visits WHERE device = ?1 ORDER BY start_ms, id").unwrap();
+        stmt.query_map(params![device], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap()
     }
 }
 
@@ -671,9 +715,17 @@ mod tests {
 
         archive.set_remote_device("d1", "laptop", None).unwrap();
         archive.set_remote_device("d1", "old laptop", Some(1234)).unwrap();
-        let row: (String, Option<i64>) =
-            archive.conn.query_row("SELECT name, last_seen_ms FROM devices", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
-        assert_eq!(row, ("old laptop".to_string(), Some(1234)));
+        archive.insert_remote("d1", &[("d1:visits:1".into(), one_of_each(0).remove(2))]).unwrap();
+        let devices = archive.remote_devices().unwrap();
+        assert_eq!(
+            devices,
+            [RemoteDevice { id: "d1".into(), name: "old laptop".into(), last_seen_ms: Some(1234), rows: 1 }]
+        );
+
+        archive.clear_sync_state().unwrap();
+        assert_eq!(archive.sync_value("push:visits").unwrap(), None);
+        assert!(archive.remote_devices().unwrap().is_empty());
+        assert_eq!(archive.conn.query_row("SELECT COUNT(*) FROM visits", [], |r| r.get::<_, i64>(0)).unwrap(), 1, "pulled rows stay");
     }
 
     #[test]

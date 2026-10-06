@@ -7,6 +7,7 @@ mod niri;
 mod procscan;
 mod server;
 mod sound;
+mod sync;
 mod settings;
 mod terminal;
 mod update;
@@ -504,6 +505,12 @@ impl Daemon {
             Request::BrowserMedia { source, urls } => {
                 Ok((engine.handle(Input::BrowserMedia { source, urls }, now), None))
             }
+            Request::SyncRegister { .. }
+            | Request::SyncLogin { .. }
+            | Request::SyncLogout
+            | Request::SyncStatus
+            | Request::SyncNow
+            | Request::SyncKey => Err("sync requests go to the sync thread".into()),
             Request::Lock { until_ms } => {
                 let text = self.config_text.clone();
                 self.engine.lock(until_ms, &text, now).map(|msg| (Vec::new(), Some(msg)))
@@ -594,6 +601,11 @@ async fn main() -> anyhow::Result<()> {
     let mut ticks: u64 = 0;
     let mut terminal_watch = terminal::Watch::default();
     let mut update_checker = update::Checker::default();
+    // Sync reads and writes history.db through a connection of its own.
+    let sync = daemon.archive.is_some().then(|| {
+        let archive_path = habit_ipc::archive_path_for(&daemon.state_path);
+        sync::spawn(archive_path, daemon.state_path.with_file_name("sync.json"))
+    });
 
     eprintln!("habitd: listening on {}", socket_path.display());
     loop {
@@ -615,6 +627,16 @@ async fn main() -> anyhow::Result<()> {
                         let effects = daemon.engine.handle(input, now);
                         daemon.apply(effects, now);
                     }
+                    Event::Request(request, reply) if request.is_sync() => match &sync {
+                        Some(sync) => {
+                            if let Err(std::sync::mpsc::SendError((_, reply))) = sync.send((request, reply)) {
+                                let _ = reply.send(Response::err("the sync thread stopped; see `journalctl --user -u habitd`"));
+                            }
+                        }
+                        None => {
+                            let _ = reply.send(Response::err("sync is off: history.db can't be opened"));
+                        }
+                    },
                     Event::Request(request, reply) => {
                         let _ = reply.send(daemon.handle_request(request, now));
                     }

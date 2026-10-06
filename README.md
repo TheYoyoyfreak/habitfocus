@@ -284,6 +284,24 @@ requests that read through to habitd.
 Only habitd writes the database; `hf` asks it through the socket. It's plain SQLite, so
 `sqlite3 ~/.local/state/habitfocus/history.db` works for your own queries.
 
+### Sync between devices (experimental)
+
+habitd can copy the history of each of your devices to the others through a
+[habitfocus sync server](https://github.com/TheYoyoyfreak/habitfocus_sync_server) you run yourself. Everything is
+encrypted on the device; the server can't read it.
+
+```sh
+hf sync register https://sync.example.org julian   # first device: creates the account, prints the sync key
+hf sync key                                         # shows the key again
+hf sync login https://sync.example.org julian      # every other device: asks for the password and the key
+hf sync status                                      # other devices and the last sync
+hf sync now                                         # sync right away (otherwise every 10 minutes)
+hf sync logout
+```
+
+Keep the sync key safe: without it, nobody (you included) can read the data on the server. For now the other
+devices' history is only collected; the views still show this device alone.
+
 ### The sound when a habit is done
 
 When a timed habit reaches its target — and at every round of a timer habit — habitd plays a short sound. Set it

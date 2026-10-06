@@ -62,6 +62,10 @@ crates/
     settings.rs               editing [general] in config.toml with toml_edit
     config_edit.rs            reading and editing [groups.*] / [habits.*] entries for the TUI forms
     heartbeat.rs              boot id, CLOCK_MONOTONIC, shutdown detection
+    sync/mod.rs               sync thread: account (sync.json), schedule, `sync_*` requests
+    sync/run.rs               one sync: push this device's archive rows, pull the others'
+    sync/api.rs               sync server HTTP API through curl
+    sync/crypto.rs            end-to-end encryption of records (XChaCha20-Poly1305)
   hf/src/
     main.rs                   clap CLI, status/stats rendering, `watch --reconnect`
     native_host.rs            browser native messaging host + manifest installer
@@ -443,6 +447,36 @@ baseline *before* writing, then writes atomically and reloads.
 - **Heartbeat (`heartbeat.rs`):** `/proc/sys/kernel/random/boot_id`, `clock_gettime(CLOCK_MONOTONIC)` via libc, and
   `systemctl [--user] is-system-running == "stopping"` to recognize logout/shutdown.
 
+### Sync (`sync/`)
+
+Multi-device sync through a [habitfocus sync server](https://github.com/TheYoyoyfreak/habitfocus_sync_server), a fork
+of Atuin's. It is opt-in: nothing happens until `hf sync register` or `hf sync login`.
+
+- **Thread:** `sync::spawn` runs a std thread with its own `Archive` connection (WAL; both connections have a 5 s busy
+  timeout), so a slow server never holds up the event loop. It syncs 30 s after start, then every 10 minutes, and
+  stops after the server says the session is gone (the device was signed out). The event loop hands it every
+  request where `Request::is_sync()`, with the reply channel; it answers when done.
+- **Account:** `sync.json` next to state.json (mode 0600, written atomically): server, username, the device's session
+  token and the sync key. Signing out removes it and clears `sync_state` and `devices`; pulled rows stay.
+- **Records:** every archive table is one log per device on the server (tag = table name, host = the archive's device
+  id). A record holds up to 500 rows or 512 KiB of JSON, `{"rows": [[rowid, row], …]}`, rows as they serialize in
+  habit-core. Pulled rows get the uid `<device>:<table>:<rowid>`.
+- **Cursors** (`run.rs`): `push:<table>` is `<next idx>:<last rowid sent>`, `pull:<device>:<table>` the next idx to
+  fetch. Before pushing, the server's last idx of this device's log is compared with the local one; when they differ
+  (crash after an upload, signing in again, a deleted store) the cursor is taken from the server's last record, so
+  rows are never skipped or sent twice under a new idx.
+- **Encryption** (`crypto.rs`): one random 256-bit key per account, shown at registration as `hfk1-…` and entered on
+  every other device. Records are sealed with XChaCha20-Poly1305 under a random nonce; the record's id, idx, host,
+  tag and version are the associated data, so the server can't move a record unnoticed. `cek` carries a key id, which
+  tells a wrong key apart from a damaged record; `login` checks the key against the account's first record and signs
+  the device out again if it doesn't fit.
+- **HTTP** (`api.rs`): through `curl` like the update check. The request (URL, token, body) goes to curl as a config on
+  stdin, never on its command line. `run.rs` uses the `Api` trait, which the tests implement with an in-memory server.
+- **Forward compatibility:** rows that don't parse (an event kind from a newer habitfocus) are skipped; tables this
+  version doesn't know are left on the server.
+
+Pulled rows are stored but not shown yet: every view reads this device's rows only.
+
 ## hf: CLI, TUI and native host
 
 ### CLI (`main.rs`)
@@ -538,6 +572,7 @@ MV3, one codebase for Firefox-family and Chromium browsers (the manifest has bot
 | `~/.config/habitfocus/config.toml` | user config (`hf init` writes `contrib/config.example.toml`) |
 | `~/.local/state/habitfocus/state.json` | persisted `State` (written atomically via `.tmp` + rename) |
 | `~/.local/state/habitfocus/history.db` | archive: events, sessions, visits, afk, and this device's sync identity (SQLite, WAL mode; `hf paths` prints it) |
+| `~/.local/state/habitfocus/sync.json` | sync account: server, user, session token, sync key (mode 0600; only after `hf sync register`/`login`) |
 | `$XDG_RUNTIME_DIR/habitfocus.sock` | daemon socket |
 | `~/.config/systemd/user/habitd.service` | from `contrib/habitd.service` |
 | `~/.mozilla/native-messaging-hosts/dev.habitfocus.host.json` (and `~/.zen`, Chromium dirs) | native host manifests |

@@ -15,3 +15,4 @@ ratatui = "0.30"
 ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm"] }
 tiny-skia = "0.12"
 image = { version = "0.25", default-features = false }
+rpassword = "7"

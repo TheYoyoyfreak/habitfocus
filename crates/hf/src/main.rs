@@ -1,6 +1,7 @@
 mod native_host;
 mod setup;
 mod stats_view;
+mod sync;
 mod tui;
 mod update;
 mod web;
@@ -162,6 +163,11 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Sync statistics between your devices through a sync server
+    Sync {
+        #[command(subcommand)]
+        command: sync::SyncCommand,
+    },
     /// Print config, state and socket paths
     Paths,
     /// Register `hf` as native messaging host for the browser extension
@@ -298,6 +304,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Setup { start, uninstall } => setup::run(start, uninstall)?,
         Command::Update { check } => update::run(check)?,
+        Command::Sync { command } => sync::run(command)?,
         Command::InstallNativeHost { uninstall } => native_host::install(uninstall)?,
         Command::NativeHost => native_host::run()?,
         Command::Paths => {

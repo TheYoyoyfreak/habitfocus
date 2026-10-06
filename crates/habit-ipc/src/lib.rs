@@ -92,6 +92,34 @@ pub enum Request {
     /// URLs of the tabs playing sound right now, in any window and focused or
     /// not (browser extension via `hf native-host`). Replaces the last report.
     BrowserMedia { source: String, urls: Vec<String> },
+    /// Create an account on a sync server and sign this device in. The answer
+    /// carries the new sync key, which every other device needs.
+    SyncRegister { server: String, username: String, email: String, password: String },
+    /// Sign this device in to an existing sync account.
+    SyncLogin { server: String, username: String, password: String, key: String },
+    /// Sign this device out; what it pulled from other devices stays.
+    SyncLogout,
+    /// Account, devices and the last sync.
+    SyncStatus,
+    /// Sync right away and answer when done.
+    SyncNow,
+    /// The sync key, for signing in another device.
+    SyncKey,
+}
+
+impl Request {
+    /// Handled by habitd's sync thread, off the event loop.
+    pub fn is_sync(&self) -> bool {
+        matches!(
+            self,
+            Request::SyncRegister { .. }
+                | Request::SyncLogin { .. }
+                | Request::SyncLogout
+                | Request::SyncStatus
+                | Request::SyncNow
+                | Request::SyncKey
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
