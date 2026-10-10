@@ -359,6 +359,8 @@ Turn it on in the config (or with *Book library* in the TUI settings, `o`):
 [books]
 enabled = true
 habits = ["reading", "book"]   # timer or app habits whose sessions are reading
+rating = "stars"               # or "points": ratings as five stars (halves too) or 0–10, on every device
+google_books_key = "AIza…"     # optional: a Google Books API key for searches (see below)
 ```
 
 Which book a session counts for:
@@ -379,10 +381,23 @@ sessions, `I` opens the inbox, `C` switches covers (picture / pixel art / off), 
 pictures in kitty, foot (sixel), WezTerm and iTerm2, elsewhere as pixel art; they're cached in
 `~/.cache/habitfocus/covers`.
 
+- **When you read a book:** the book form has *Started* and *Finished* (`YYYY-MM-DD`), filled in from the book's
+  status changes or its sessions. Set them by hand for books you read before adding them: a book counts as read in
+  the month it was finished (the mobile app's *Books read* chart).
+- **Ratings** are kept out of 10. `rating` under `[books]` (or *Book ratings* in the settings, `o`) shows them as
+  five stars with halves or as points, on every device. Older habitfocus versions see them rounded to five.
+- **Own covers:** put an image file (`~/Pictures/dune.jpg`) in the book's *Cover* field. habitd scales it down to a
+  small JPEG and keeps it in the book, so it syncs to your other devices and the app; the field then reads
+  *(own image)*. A web address works as before.
+- **Search** (`O`, `hf books search`) asks Open Library and Google Books, which knows more manga and recent
+  editions. Without a key, Google's quota is shared by everyone and often used up; a free key (Google Cloud
+  console, *Books API*, 1000 searches a day) goes in `google_books_key` and reaches the mobile app, end-to-end
+  encrypted, with the habits it syncs.
+
 ```sh
 hf books list [-s reading] [-q herbert] [--json]
 hf books add "Dune" -a "Frank Herbert" -p 612 -s reading
-hf books search "der name des windes"            # Open Library; --add 1 -s reading adds a result
+hf books search "der name des windes"            # Open Library and Google Books; --add 1 -s reading adds a result
 hf books status dune finished
 hf books pin dune                                 # the next reading session is for Dune (--clear)
 hf books page 120                                 # page reached in the latest session [--book …]

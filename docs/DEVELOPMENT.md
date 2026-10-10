@@ -57,7 +57,8 @@ crates/
     db.rs                     books.db: schema, books, the `rev` change counter (store)
     sessions.rs inbox.rs      sessions and readings; habit sessions to books, pin, inbox (store)
     sync.rs                   local changes and last-write-wins merging for sync (store)
-    openlibrary.rs covers.rs  Open Library search, cover cache (curl; store)
+    openlibrary.rs covers.rs  Open Library search, cover cache and own images (curl; store)
+    googlebooks.rs            Google Books search, merging its hits with Open Library's
     import.rs                 one-time import of a booktrack database (store)
   habitd/src/
     main.rs                   Daemon struct, event loop, request handling, config/lock loading
@@ -534,7 +535,13 @@ of Atuin's. It is opt-in: nothing happens until `hf sync register` or `hf sync l
   `Event::BooksSynced` makes the books thread publish a new `seq`.
 - **Habits for clients** (`habits.rs`): after the tables, a record with tag `habits` goes out whenever the
   config file's habits changed (hash in `sync_state` as `habits:hash`): `[[0, summary]]` with every habit's id,
-  name, kind, target, goal, unit, daily limit and strictness, `books` (`enabled`, `habits`) and `day_start_ms`.
+  name, kind, target, goal, unit, daily limit and strictness, `books` (`enabled`, `habits`, `rating`,
+  `google_books_key`) and `day_start_ms`.
+- **Book rows across versions:** ratings are `score` out of 10; `rating` out of 5 (`score` halved, rounded up) is
+  still written for older versions. A row without `score` (from an older version) reads as `rating * 2`
+  (`COALESCE` in `db.rs`, `scoreOf` in the app). Own covers are `data:image/jpeg;base64,…` URLs in `cover_url`,
+  at most about 80 KB (`covers::embed`), so they travel with their row; `covers::fetch` writes them to the cover
+  cache. `BooksOp::SetDates` (`Db::set_dates`) moves the latest reading or opens one.
   Clients without a config of their own (the habitfocus_mobile app) take the newest record of all devices.
 - **Test vector** (`crypto.rs`, `sealing_matches_the_published_vector`): a fixed key, nonce and record and the `raw`
   they seal to. Other clients check against the same values; don't change them.
