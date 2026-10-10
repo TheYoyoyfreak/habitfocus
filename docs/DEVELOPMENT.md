@@ -76,6 +76,7 @@ crates/
     sync/mod.rs               sync thread: account (sync.json), schedule, `sync_*` requests
     sync/run.rs               one sync: push this device's archive rows, pull the others'
     sync/books.rs             the same for books.db's tables, merged last write wins
+    sync/habits.rs            the `habits` record: this device's habits for clients without a config
     sync/api.rs               sync server HTTP API through curl
     sync/crypto.rs            end-to-end encryption of records (XChaCha20-Poly1305)
   hf/src/
@@ -522,6 +523,12 @@ of Atuin's. It is opt-in: nothing happens until `hf sync register` or `hf sync l
   books.db's settings). Arriving rows are upserted when newer (`updated_at`, then `device_id`) and keep `rev = 0`,
   so they never go out again. A session whose `external_ref` waits in the inbox here clears it. When rows arrived,
   `Event::BooksSynced` makes the books thread publish a new `seq`.
+- **Habits for clients** (`habits.rs`): after the tables, a record with tag `habits` goes out whenever the
+  config file's habits changed (hash in `sync_state` as `habits:hash`): `[[0, summary]]` with every habit's id,
+  name, kind, target, goal, unit, daily limit and strictness, `books` (`enabled`, `habits`) and `day_start_ms`.
+  Clients without a config of their own (the habitfocus_mobile app) take the newest record of all devices.
+- **Test vector** (`crypto.rs`, `sealing_matches_the_published_vector`): a fixed key, nonce and record and the `raw`
+  they seal to. Other clients check against the same values; don't change them.
 
 - **Status:** the thread sends `Event::SyncChanged(Option<SyncView>)` to the event loop whenever something changes
   (sign in or out, a sync starting or ending, the server going away or coming back); `Engine::set_sync` puts it in

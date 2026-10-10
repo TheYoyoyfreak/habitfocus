@@ -57,12 +57,17 @@ impl std::fmt::Debug for Key {
 /// Seals `plaintext`; returns the record's `raw` and `cek` (the key id).
 pub fn seal(key: &Key, plaintext: &[u8], aad: &str) -> (String, String) {
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    (seal_with_nonce(key, &nonce, plaintext, aad), key.id())
+}
+
+/// The `raw` of `plaintext` sealed under `nonce`.
+fn seal_with_nonce(key: &Key, nonce: &XNonce, plaintext: &[u8], aad: &str) -> String {
     let sealed = XChaCha20Poly1305::new(&key.0.into())
-        .encrypt(&nonce, Payload { msg: plaintext, aad: aad.as_bytes() })
+        .encrypt(nonce, Payload { msg: plaintext, aad: aad.as_bytes() })
         .expect("encrypting into memory can't fail");
     let mut bytes = nonce.to_vec();
     bytes.extend_from_slice(&sealed);
-    (format!("{RAW_PREFIX}{}", URL_SAFE_NO_PAD.encode(bytes)), key.id())
+    format!("{RAW_PREFIX}{}", URL_SAFE_NO_PAD.encode(bytes))
 }
 
 /// Opens what `seal` sealed with the same `aad`.
@@ -100,6 +105,21 @@ mod tests {
         tampered.push(if raw.ends_with('A') { 'B' } else { 'A' });
         assert!(open(&key, &tampered, &cek, "place a").is_err());
         assert_ne!(seal(&key, b"rows", "place a").0, raw, "a fresh nonce every time");
+    }
+
+    /// Other clients (the habitfocus_mobile app) check against these values
+    /// that they seal byte for byte the same; don't change them.
+    #[test]
+    fn sealing_matches_the_published_vector() {
+        let key = Key((0u8..32).collect::<Vec<_>>().try_into().unwrap());
+        assert_eq!(key.to_text(), "hfk1-AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8");
+        assert_eq!(key.id(), "hfk1-9VgONU3vH1mTPL10");
+        let nonce = XNonce::from([7u8; NONCE_LEN]);
+        let aad = "habitfocus sync|0199b4c2-0000-7000-8000-000000000000|3|0199b4c1-0000-7000-8000-000000000000|sessions|v1";
+        let plaintext = br#"{"rows":[[1,{"habit":"read","started_at":1000,"finished_at":61000,"focused_ms":60000,"outcome":"completed"}]]}"#;
+        let raw = seal_with_nonce(&key, &nonce, plaintext, aad);
+        assert_eq!(raw, "hf1.BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHnZ0ptyka5q4nwUQLOwURQfqqshNQw7FaWllHOwhb_CuXtpAwfZETPvFu90Ftlq7rTPU1M-ynZsmiesl0hfCfx0yKj_8QKAz9JWLlTfl468surZQYaeXuTr80lTB4Wk_N0UyUZYMdNMbfq1aFEkE_03VfJBZu75AXJdL1RvCN");
+        assert_eq!(open(&key, &raw, &key.id(), aad).unwrap(), plaintext);
     }
 
     #[test]

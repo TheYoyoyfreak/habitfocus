@@ -13,6 +13,7 @@
 mod api;
 mod books;
 mod crypto;
+mod habits;
 mod run;
 
 use crate::archive::Archive;
@@ -20,6 +21,7 @@ use api::{Api, ApiError, DeviceInfo, Http};
 use crypto::Key;
 use habit_core::snapshot::{SyncDeviceView, SyncView};
 use habit_core::state::State;
+use habit_core::Config;
 use habit_ipc::{Request, Response};
 use run::{Summary, SyncError};
 use serde::{Deserialize, Serialize};
@@ -334,6 +336,11 @@ impl Syncer {
                     books_received = more.received;
                     summary.sent += more.sent;
                     summary.received += more.received;
+                }
+                // The file's habits (a committed baseline may differ; clients only show them).
+                let config = std::fs::read_to_string(habit_ipc::config_path()).ok().and_then(|t| Config::from_toml(&t).ok());
+                if let Some(config) = config {
+                    habits::publish(&http as &dyn Api, &mut self.archive, &key, &config)?;
                 }
                 Ok(summary)
             });
