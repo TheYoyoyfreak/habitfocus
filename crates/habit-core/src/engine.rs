@@ -557,17 +557,25 @@ impl Engine {
     /// Its time counts like progress saved earlier today: into a running
     /// session of the habit, or towards its next start, and completes the
     /// habit here (with its reward) once today's time reaches the target.
-    /// Sessions of an earlier day, or of habits this device doesn't time,
-    /// change nothing.
+    /// A session of an earlier day (synced late, e.g. while this device was
+    /// off) only goes into that day's stats: it completes the habit there once
+    /// the day's time reaches the target, keeping the streak, but earns
+    /// nothing (credit of a past day would have expired). Sessions of habits
+    /// this device doesn't time change nothing.
     pub fn remote_session(&mut self, entry: &HistoryEntry, device: &str, now: u64) -> Vec<Effect> {
         let mut fx = Vec::new();
         let Some(habit) = self.config.habits.get(&entry.habit).cloned() else { return fx };
         let today = self.day_of(now);
-        if !habit.kind.is_timed() || entry.focused_ms == 0 || self.day_of(entry.finished_at) != today {
+        let day = self.day_of(entry.finished_at);
+        if !habit.kind.is_timed() || entry.focused_ms == 0 || day > today {
             return fx;
         }
         let ms = entry.focused_ms;
         let name = self.config.habit_name(&entry.habit).to_string();
+        if day < today {
+            self.past_remote_session(&habit, entry, device, day, now);
+            return fx;
+        }
         stats::record(&mut self.state.days, today, &entry.habit, ms, false);
         self.dirty = true;
         self.log_event(
@@ -623,6 +631,29 @@ impl Engine {
             self.log_and_notify(&mut fx, now, EventKind::HabitCompleted, Some(&entry.habit), habit.reward.duration, text);
         }
         fx
+    }
+
+    /// `remote_session` for a session of the earlier day `day`.
+    fn past_remote_session(&mut self, habit: &Habit, entry: &HistoryEntry, device: &str, day: i64, now: u64) {
+        let name = self.config.habit_name(&entry.habit).to_string();
+        stats::record(&mut self.state.days, day, &entry.habit, entry.focused_ms, false);
+        let stats = self.state.days.get_mut(&day).and_then(|d| d.get_mut(&entry.habit)).expect("just recorded");
+        let due = match habit.on_target() {
+            _ if habit.target == 0 => 0,
+            OnTarget::Finish => u32::from(stats.focused_ms >= habit.target),
+            OnTarget::Ask => u32::try_from(stats.focused_ms / habit.target).unwrap_or(u32::MAX),
+        };
+        let completed = stats.completions == 0 && due > 0;
+        stats.completions = stats.completions.max(due);
+        self.dirty = true;
+        let date = stats::civil_date(day);
+        let text = if completed {
+            format!("{name}: {} on {device} on {date}; done that day (no unlock for a past day)", format_duration(entry.focused_ms))
+        } else {
+            format!("{name}: {} on {device} on {date}", format_duration(entry.focused_ms))
+        };
+        let kind = if completed { EventKind::HabitCompleted } else { EventKind::SessionStopped };
+        self.log_event(now, kind, Some(&entry.habit), entry.focused_ms, text);
     }
 
     /// Spends banked credit on a group. `duration: None` spends all of it.
@@ -4404,13 +4435,35 @@ mod tests {
     }
 
     #[test]
-    fn remote_sessions_of_other_days_or_habits_change_nothing() {
+    fn remote_sessions_of_unknown_habits_change_nothing() {
         let mut e = timer_engine();
         let now = 30 * HOUR;
-        assert!(e.remote_session(&remote("book", 3 * HOUR, 30 * MIN), "iPhone", now).is_empty());
         assert!(e.remote_session(&remote("unknown", now, 30 * MIN), "iPhone", now).is_empty());
         assert!(e.state().credits.is_empty());
-        assert!(e.state().progress.is_empty());
         assert!(e.events(10).is_empty());
+    }
+
+    #[test]
+    fn late_remote_sessions_keep_the_streak_of_their_day_without_a_reward() {
+        let mut e = timer_engine();
+        // Day 0 (from 04:00) done here; day 1 only on the phone, synced on day 2.
+        let day0 = 5 * HOUR;
+        e.remote_session(&remote("book", day0, 20 * MIN), "iPhone", day0);
+        let day1 = day0 + DAY_MS as u64;
+        let now = day1 + DAY_MS as u64;
+        e.handle(Input::Tick, now);
+        let credits_before = e.state().credits.clone();
+        e.remote_session(&remote("book", day1, 12 * MIN), "iPhone", now);
+        assert_eq!(e.state().days[&e.day_of(day1)]["book"].completions, 0, "12 of 20 minutes");
+        let fx = e.remote_session(&remote("book", day1 + MIN, 9 * MIN), "iPhone", now);
+        assert!(fx.is_empty(), "no notification, sound or unlock: {fx:?}");
+        assert_eq!(e.state().days[&e.day_of(day1)]["book"].completions, 1);
+        assert_eq!(e.state().credits, credits_before);
+        assert!(e.state().progress.is_empty(), "today's progress stays untouched");
+        assert!(e.events(1)[0].text.contains("done that day"), "{:?}", e.events(1));
+        // Day 2 not done yet, so the streak runs through yesterday.
+        assert_eq!(stats::habit_streak(&e.state().days, e.day_of(now), "book").current, 2);
+        // Later days than today (a clock off on the other device) count nowhere.
+        assert!(e.remote_session(&remote("book", now + DAY_MS as u64, 30 * MIN), "iPhone", now).is_empty());
     }
 }

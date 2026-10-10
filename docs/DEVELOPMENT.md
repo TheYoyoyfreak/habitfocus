@@ -350,7 +350,9 @@ The one exception to "pulled rows change nothing": sessions new to this device g
 ones of timed habits like progress saved earlier today: into a running session of the habit (added to
 `accumulated_ms` and `resumed_ms`, so the session's own record keeps its own time), or into `state.progress`,
 completing the habit with its reward once the target is reached (one completion for `finish` habits, every full
-target for `ask` ones, the rest stays saved). Sessions of an earlier day change nothing.
+target for `ask` ones, the rest stays saved). A session of an earlier day (synced late, e.g. while this device was
+off) only goes into that day's `days` entry and completes the habit there once the day's time reaches the target,
+so streaks hold; it earns nothing, as credit of a past day would have expired.
 
 ### Commitment lock (`lock.rs`)
 
