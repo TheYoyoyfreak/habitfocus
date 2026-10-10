@@ -277,12 +277,14 @@ impl Archive {
     }
 
     /// Stores records another device wrote, keyed by their uid; ones already
-    /// here are skipped. Returns how many were new.
-    pub fn insert_remote(&mut self, device: &str, rows: &[(String, Record)]) -> anyhow::Result<usize> {
+    /// here are skipped. Returns the positions in `rows` of the new ones.
+    pub fn insert_remote(&mut self, device: &str, rows: &[(String, Record)]) -> anyhow::Result<Vec<usize>> {
         let tx = self.conn.transaction()?;
-        let mut added = 0;
-        for (uid, record) in rows {
-            added += insert_row(&tx, record, Some((device, uid)))?;
+        let mut added = Vec::new();
+        for (i, (uid, record)) in rows.iter().enumerate() {
+            if insert_row(&tx, record, Some((device, uid)))? > 0 {
+                added.push(i);
+            }
         }
         tx.commit()?;
         Ok(added)
@@ -775,8 +777,8 @@ mod tests {
         let laptop = "0199b4c1-0000-7000-8000-000000000001";
         let rows: Vec<(String, Record)> =
             one_of_each(0).into_iter().enumerate().map(|(i, r)| (format!("{laptop}:x:{i}"), r)).collect();
-        assert_eq!(archive.insert_remote(laptop, &rows).unwrap(), 4);
-        assert_eq!(archive.insert_remote(laptop, &rows).unwrap(), 0, "pulling again changes nothing");
+        assert_eq!(archive.insert_remote(laptop, &rows).unwrap().len(), 4);
+        assert!(archive.insert_remote(laptop, &rows).unwrap().is_empty(), "pulling again changes nothing");
 
         assert_eq!(archive.visits(0, 1000).unwrap().iter().map(|v| v.key.as_str()).collect::<Vec<_>>(), ["kitty"]);
         assert!(archive.events(10).unwrap().is_empty());

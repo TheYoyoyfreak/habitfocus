@@ -343,7 +343,14 @@ the other device's id and the row's global uid (`<device>:<table>:<rowid there>`
 All queries for the engine and the views read `device IS NULL` only, so pulled rows change nothing until views ask
 for them. For sync, `local_rows(table, after, limit)` reads this device's rows by rowid cursor with their uid,
 `insert_remote(device, rows)` stores another device's rows (`INSERT OR IGNORE` on the uid, so pulling twice is
-harmless), and `sync_state` / `devices` hold cursors and the account's other devices.
+harmless) and returns which were new, and `sync_state` / `devices` hold cursors and the account's other devices.
+
+The one exception to "pulled rows change nothing": sessions new to this device go to the event loop as
+`Event::RemoteSessions` right after the pull (they won't come again), and `Engine::remote_session` counts today's
+ones of timed habits like progress saved earlier today: into a running session of the habit (added to
+`accumulated_ms` and `resumed_ms`, so the session's own record keeps its own time), or into `state.progress`,
+completing the habit with its reward once the target is reached (one completion for `finish` habits, every full
+target for `ask` ones, the rest stays saved). Sessions of an earlier day change nothing.
 
 ### Commitment lock (`lock.rs`)
 

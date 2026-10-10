@@ -31,10 +31,12 @@ pub(super) const PAGE: u64 = 20;
 const VERSION: &str = "v1";
 
 /// What a sync moved.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Summary {
     pub sent: usize,
     pub received: usize,
+    /// Sessions of other devices new to this one, with the device's name.
+    pub sessions: Vec<(String, HistoryEntry)>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -217,7 +219,13 @@ pub fn sync(api: &dyn Api, archive: &mut Archive, key: &Key) -> Result<Summary, 
                         .into_iter()
                         .filter_map(|(rowid, value)| Some((format!("{host}:{tag}:{rowid}"), from_json(table, value)?)))
                         .collect();
-                    summary.received += archive.insert_remote(host, &rows)?;
+                    let added = archive.insert_remote(host, &rows)?;
+                    summary.received += added.len();
+                    for i in added {
+                        if let Record::Session(session) = &rows[i].1 {
+                            summary.sessions.push((host.clone(), session.clone()));
+                        }
+                    }
                     start = record.idx + 1;
                     archive.set_sync_value(&key_name, &start.to_string())?;
                 }
@@ -228,6 +236,9 @@ pub fn sync(api: &dyn Api, archive: &mut Archive, key: &Key) -> Result<Summary, 
     for remote in api.devices()? {
         if remote.id != device.id {
             archive.set_remote_device(&remote.id, &remote.name, Some(remote.last_seen_ms))?;
+            for (host, _) in summary.sessions.iter_mut().filter(|(host, _)| *host == remote.id) {
+                host.clone_from(&remote.name);
+            }
         }
     }
     Ok(summary)
@@ -238,7 +249,7 @@ pub mod tests {
     use super::*;
     use crate::sync::api::{RemoteDevice, ServerStatus};
     use habit_core::archive::AfkReason;
-    use habit_core::state::{EventKind, State};
+    use habit_core::state::{EventKind, Outcome, State};
     use std::cell::RefCell;
     use std::collections::BTreeMap;
 
@@ -316,9 +327,9 @@ pub mod tests {
         laptop.write(&[Record::Afk(Afk { start: 20, end: 30, reason: AfkReason::Idle })]).unwrap();
         desktop.write(&[visit("steam", 100)]).unwrap();
 
-        assert_eq!(sync(&server, &mut laptop, &key).unwrap(), Summary { sent: 4, received: 0 });
-        assert_eq!(sync(&server, &mut desktop, &key).unwrap(), Summary { sent: 1, received: 4 });
-        assert_eq!(sync(&server, &mut laptop, &key).unwrap(), Summary { sent: 0, received: 1 });
+        assert_eq!(sync(&server, &mut laptop, &key).unwrap(), Summary { sent: 4, received: 0, ..Default::default() });
+        assert_eq!(sync(&server, &mut desktop, &key).unwrap(), Summary { sent: 1, received: 4, ..Default::default() });
+        assert_eq!(sync(&server, &mut laptop, &key).unwrap(), Summary { sent: 0, received: 1, ..Default::default() });
         assert_eq!(sync(&server, &mut desktop, &key).unwrap(), Summary::default(), "nothing new");
 
         let laptop_id = laptop.device().id.clone();
@@ -419,6 +430,19 @@ pub mod tests {
         let mut desktop = Archive::in_memory(&State::default());
         assert!(matches!(sync(&server, &mut desktop, &wrong), Err(SyncError::Crypto(_))));
         assert!(check_key(&FakeServer::default(), &wrong).is_ok(), "an empty account takes any key");
+    }
+
+    #[test]
+    fn new_sessions_of_other_devices_are_reported_once() {
+        let server = FakeServer::default();
+        let key = Key::generate();
+        let (mut phone, mut desktop) = (Archive::in_memory(&State::default()), Archive::in_memory(&State::default()));
+        let session = HistoryEntry { habit: "read".into(), started_at: 0, finished_at: 60_000, focused_ms: 60_000, outcome: Outcome::Stopped };
+        phone.write(&[Record::Session(session.clone()), visit("zen", 0)]).unwrap();
+        server.devices.borrow_mut().push(RemoteDevice { id: phone.device().id.clone(), name: "iPhone".into(), last_seen_ms: 1 });
+        sync(&server, &mut phone, &key).unwrap();
+        assert_eq!(sync(&server, &mut desktop, &key).unwrap().sessions, [("iPhone".to_string(), session)]);
+        assert!(sync(&server, &mut desktop, &key).unwrap().sessions.is_empty());
     }
 
     #[test]

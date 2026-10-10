@@ -333,8 +333,13 @@ Once other devices have synced, the TUI shows how sync goes in its header and si
 through the devices: this one, each other device, and **all devices**. All devices adds the time *at any screen*:
 two devices used at the same time count once there, while the table sums them. `hf web` has the same device row
 (and `v`) on Timeline and Screen time, and the sync status in its header. On the command line, `hf apps
---device <name>` or `--device all` does the same. Habits and streaks still count this device only. Without sync
-nothing of this shows; the settings (`o`) explain how to set it up.
+--device <name>` or `--device all` does the same. Without sync nothing of this shows; the settings (`o`) explain
+how to set it up.
+
+Sessions of timed habits finished on another device today count here too, once they arrive: like progress saved
+earlier today, they add to a running session of the habit or to its next start, and complete the habit here (with
+its reward) when today's time reaches the target. Read 20 minutes on the phone, and the desktop unlocks what reading
+earns there.
 
 On the iPhone, [habitfocus mobile](https://github.com/TheYoyoyfreak/habitfocus_mobile) joins the same account as
 one more device: a habit timer and the book library as a home-screen web app, using the habits the desktop

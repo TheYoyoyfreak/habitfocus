@@ -114,8 +114,8 @@ mod tests {
         on_laptop.record_habit_session("read", 1_000, 61_000, 60_000).unwrap();
 
         // book, reading and session out; nothing in yet
-        assert_eq!(sync(&server, &on_laptop, &key, &laptop).unwrap(), Summary { sent: 3, received: 0 });
-        assert_eq!(sync(&server, &on_phone, &key, &phone).unwrap(), Summary { sent: 0, received: 3 });
+        assert_eq!(sync(&server, &on_laptop, &key, &laptop).unwrap(), Summary { sent: 3, received: 0, ..Default::default() });
+        assert_eq!(sync(&server, &on_phone, &key, &phone).unwrap(), Summary { sent: 0, received: 3, ..Default::default() });
         assert_eq!(on_phone.list_sessions(None).unwrap()[0].device, "laptop");
         assert_eq!(sync(&server, &on_laptop, &key, &laptop).unwrap(), Summary::default(), "nothing new");
 

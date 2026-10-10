@@ -34,6 +34,9 @@ pub enum Event {
     BooksChanged(habit_core::snapshot::BooksView),
     /// Sync brought changes to the book library.
     BooksSynced,
+    /// Sync brought sessions other devices finished (device name, session);
+    /// today's count towards this device's habits.
+    RemoteSessions(Vec<(String, habit_core::state::HistoryEntry)>),
 }
 
 /// The compositor whose windows are tracked and closed or focused.
@@ -735,6 +738,12 @@ async fn main() -> anyhow::Result<()> {
                     Event::BooksSynced => {
                         if let Some(books) = &daemon.books {
                             let _ = books.send(books::Job::Changed);
+                        }
+                    }
+                    Event::RemoteSessions(sessions) => {
+                        for (device, session) in sessions {
+                            let effects = daemon.engine.remote_session(&session, &device, now);
+                            daemon.apply(effects, now);
                         }
                     }
                     Event::UpdateChecked(result) => {

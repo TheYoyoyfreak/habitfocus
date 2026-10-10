@@ -331,6 +331,11 @@ impl Syncer {
             .map_err(SyncError::Archive)
             .and_then(|(http, key)| {
                 let mut summary = run::sync(&http as &dyn Api, &mut self.archive, &key)?;
+                // Handed over at once: they're in history.db now and won't come again.
+                let sessions = std::mem::take(&mut summary.sessions);
+                if !sessions.is_empty() {
+                    let _ = self.events.blocking_send(crate::Event::RemoteSessions(sessions));
+                }
                 if let Some(db) = &books {
                     let more = books::sync(&http as &dyn Api, db, &key, &device)?;
                     books_received = more.received;

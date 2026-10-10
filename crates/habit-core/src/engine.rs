@@ -553,6 +553,78 @@ impl Engine {
         Ok(fx)
     }
 
+    /// A session another device of the sync account finished (e.g. the phone).
+    /// Its time counts like progress saved earlier today: into a running
+    /// session of the habit, or towards its next start, and completes the
+    /// habit here (with its reward) once today's time reaches the target.
+    /// Sessions of an earlier day, or of habits this device doesn't time,
+    /// change nothing.
+    pub fn remote_session(&mut self, entry: &HistoryEntry, device: &str, now: u64) -> Vec<Effect> {
+        let mut fx = Vec::new();
+        let Some(habit) = self.config.habits.get(&entry.habit).cloned() else { return fx };
+        let today = self.day_of(now);
+        if !habit.kind.is_timed() || entry.focused_ms == 0 || self.day_of(entry.finished_at) != today {
+            return fx;
+        }
+        let ms = entry.focused_ms;
+        let name = self.config.habit_name(&entry.habit).to_string();
+        stats::record(&mut self.state.days, today, &entry.habit, ms, false);
+        self.dirty = true;
+        self.log_event(
+            now,
+            EventKind::SessionStopped,
+            Some(&entry.habit),
+            ms,
+            format!("{name}: {} on {device}", format_duration(ms)),
+        );
+
+        if let Some(session) = self.state.session.as_mut().filter(|s| s.habit == entry.habit) {
+            // Counted like resumed progress, so the session's own time stays its own.
+            session.accumulated_ms += ms;
+            session.resumed_ms += ms;
+            self.update_session(now, &mut fx);
+            return fx;
+        }
+
+        let saved = match self.state.progress.get(&entry.habit) {
+            Some(p) if p.day == today => p.ms,
+            _ => 0,
+        };
+        let mut left = saved + ms;
+        let mut rounds = 0;
+        if habit.target > 0 {
+            match habit.on_target() {
+                OnTarget::Finish if left >= habit.target => {
+                    rounds = 1;
+                    left = 0;
+                }
+                OnTarget::Finish => {}
+                OnTarget::Ask => {
+                    while left >= habit.target {
+                        rounds += 1;
+                        left -= habit.target;
+                    }
+                }
+            }
+        }
+        if left > 0 {
+            self.state.progress.insert(entry.habit.clone(), SavedProgress { ms: left, day: today });
+        } else {
+            self.state.progress.remove(&entry.habit);
+        }
+        for _ in 0..rounds {
+            stats::record(&mut self.state.days, today, &entry.habit, 0, true);
+            let mut text = format!("{name} done on {device}. {}.", self.grant_reward(&habit, now));
+            let streak = stats::habit_streak(&self.state.days, today, &entry.habit).current;
+            if streak >= 2 {
+                text += &format!(" {streak}-day streak.");
+            }
+            self.play_sound(&mut fx);
+            self.log_and_notify(&mut fx, now, EventKind::HabitCompleted, Some(&entry.habit), habit.reward.duration, text);
+        }
+        fx
+    }
+
     /// Spends banked credit on a group. `duration: None` spends all of it.
     /// Returns the effects and the granted duration.
     pub fn unlock(
@@ -4279,5 +4351,66 @@ mod tests {
         tick_through(&mut e, HOUR + MIN + 1000, HOUR + 2 * MIN);
         e.handle(Input::Tick, HOUR + 2 * MIN + 10_000);
         assert!(afk_records(&mut e).is_empty());
+    }
+
+    fn remote(habit: &str, finished_at: u64, focused_ms: u64) -> HistoryEntry {
+        HistoryEntry { habit: habit.into(), started_at: finished_at - focused_ms, finished_at, focused_ms, outcome: Outcome::Stopped }
+    }
+
+    #[test]
+    fn remote_sessions_add_up_to_a_completion() {
+        let mut e = engine();
+        let fx = e.remote_session(&remote("reading", 5 * MIN, 4 * MIN), "iPhone", 6 * MIN);
+        assert!(fx.is_empty(), "{fx:?}");
+        assert_eq!(e.state().progress["reading"].ms, 4 * MIN);
+        assert!(!e.state().credits.contains_key("social"));
+
+        let fx = e.remote_session(&remote("reading", 20 * MIN, 7 * MIN), "iPhone", 21 * MIN);
+        assert!(matches!(fx.as_slice(), [Effect::PlaySound(_), Effect::Notify { .. }]), "{fx:?}");
+        assert_eq!(e.state().credits["social"], 30 * MIN);
+        assert!(e.completed_today("reading", 21 * MIN));
+        assert!(!e.state().progress.contains_key("reading"), "a finish habit drops the overflow");
+        assert_eq!(e.today_focused("reading", 21 * MIN), 11 * MIN);
+        assert!(e.events(1)[0].text.contains("done on iPhone"), "{:?}", e.events(1));
+    }
+
+    #[test]
+    fn remote_sessions_count_into_a_running_session() {
+        let mut e = engine();
+        e.start("reading", 0).unwrap();
+        e.handle(Input::FocusChanged(Some(1)), 0);
+        e.handle(Input::Tick, 3 * MIN);
+        let fx = e.remote_session(&remote("reading", 3 * MIN, 3 * MIN), "iPhone", 3 * MIN);
+        assert!(fx.is_empty(), "{fx:?}");
+        assert_eq!(e.today_focused("reading", 3 * MIN), 6 * MIN);
+        e.handle(Input::Tick, 7 * MIN);
+        assert!(e.state().session.is_none(), "10 minutes reached");
+        assert_eq!(e.state().credits["social"], 30 * MIN);
+        // The desktop's own session keeps only its own time.
+        assert_eq!(e.history(1)[0].focused_ms, 7 * MIN);
+        assert_eq!(e.today_focused("reading", 7 * MIN), 10 * MIN);
+    }
+
+    #[test]
+    fn remote_sessions_bank_rounds_of_ask_habits_and_keep_the_rest() {
+        let mut e = timer_engine();
+        let now = 5 * HOUR;
+        e.remote_session(&remote("book", now, 45 * MIN), "iPhone", now);
+        assert_eq!(e.state().credits["social"], 2 * HOUR);
+        assert_eq!(e.state().progress["book"], SavedProgress { ms: 5 * MIN, day: e.day_of(now) });
+        // The next start resumes from there.
+        let (_, message) = e.start("book", now).unwrap();
+        assert!(message.contains("Resumed"), "{message}");
+    }
+
+    #[test]
+    fn remote_sessions_of_other_days_or_habits_change_nothing() {
+        let mut e = timer_engine();
+        let now = 30 * HOUR;
+        assert!(e.remote_session(&remote("book", 3 * HOUR, 30 * MIN), "iPhone", now).is_empty());
+        assert!(e.remote_session(&remote("unknown", now, 30 * MIN), "iPhone", now).is_empty());
+        assert!(e.state().credits.is_empty());
+        assert!(e.state().progress.is_empty());
+        assert!(e.events(10).is_empty());
     }
 }
