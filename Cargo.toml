@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/habit-core", "crates/habit-ipc", "crates/habitd", "crates/hf"]
+members = ["crates/habit-core", "crates/habit-ipc", "crates/habit-books", "crates/habitd", "crates/hf"]
 
 [workspace.package]
 version = "0.4.1"
@@ -10,6 +10,7 @@ license = "MIT"
 [workspace.dependencies]
 habit-core = { path = "crates/habit-core" }
 habit-ipc = { path = "crates/habit-ipc" }
+habit-books = { path = "crates/habit-books", default-features = false }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 regex = "1"

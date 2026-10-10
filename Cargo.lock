@@ -748,6 +748,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "habit-books"
+version = "0.4.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "habit-core"
 version = "0.4.1"
 dependencies = [
@@ -761,6 +773,7 @@ dependencies = [
 name = "habit-ipc"
 version = "0.4.1"
 dependencies = [
+ "habit-books",
  "habit-core",
  "serde",
  "serde_json",
@@ -774,6 +787,7 @@ dependencies = [
  "base64",
  "chacha20poly1305",
  "chrono",
+ "habit-books",
  "habit-core",
  "habit-ipc",
  "libc",
@@ -839,6 +853,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "habit-books",
  "habit-core",
  "habit-ipc",
  "image",
@@ -900,6 +915,8 @@ dependencies = [
  "moxcms",
  "num-traits",
  "png",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -1933,6 +1950,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2444,6 +2467,7 @@ dependencies = [
  "atomic",
  "getrandom 0.4.3",
  "js-sys",
+ "sha1_smol",
  "wasm-bindgen",
 ]
 
@@ -2970,3 +2994,18 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[package]]
+name = "zune-core"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d56377fd46368984a170bc5aac5567e52ca5da874caa60bea39fcbca78fb658b"
+
+[[package]]
+name = "zune-jpeg"
+version = "0.5.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
+dependencies = [
+ "zune-core",
+]

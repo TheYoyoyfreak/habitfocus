@@ -1,3 +1,4 @@
+mod books;
 mod native_host;
 mod setup;
 mod stats_view;
@@ -166,6 +167,11 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Your book library and reading sessions (needs `[books]` in the config)
+    Books {
+        #[command(subcommand)]
+        command: books::BooksCommand,
+    },
     /// Sync statistics between your devices through a sync server
     Sync {
         #[command(subcommand)]
@@ -317,6 +323,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Setup { start, uninstall } => setup::run(start, uninstall)?,
         Command::Update { check } => update::run(check)?,
         Command::Sync { command } => sync::run(command)?,
+        Command::Books { command } => books::run(command)?,
         Command::InstallNativeHost { uninstall } => native_host::install(uninstall)?,
         Command::NativeHost => native_host::run()?,
         Command::Paths => {

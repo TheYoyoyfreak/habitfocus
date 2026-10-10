@@ -102,6 +102,14 @@ schedule = [
 # category = "Work/Programming/habitfocus"
 # tmux_session = "habitfocus"
 
+# ---- Books --------------------------------------------------------------
+# A book library in the TUI (Books pane) and `hf books`. Sessions of the
+# habits listed here become reading sessions: of the book you pinned (`m` in
+# the Books pane), else of the only book you're reading; otherwise the TUI asks.
+# [books]
+# enabled = true
+# habits = ["reading", "book"]
+
 # ---- Habits -------------------------------------------------------------
 # The timer only runs while a window matching `allow` is focused and you're
 # not idle. Rules match on `app` (app id), `title` (regex), `url` (regex on

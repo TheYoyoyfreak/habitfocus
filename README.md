@@ -119,7 +119,7 @@ hf abort --emergency      # strict habits; unlocks are refused for a while after
 In a strict session every other window is refocused away, so run `hf abort --emergency` from a keybind (niri
 `spawn "hf" "abort" "--emergency"`, Hyprland `bind = SUPER SHIFT, Escape, exec, hf abort --emergency`) or add your terminal to `strict_exempt_apps`.
 
-The TUI has five panes, switched with `1`–`5`, `tab`/`shift-tab` or `h`/`l`. From 100 columns on they're listed in
+The TUI has five panes (six with the [book library](#books)), switched with `1`–`5`, `tab`/`shift-tab` or `h`/`l`. From 100 columns on they're listed in
 a sidebar with today's numbers, below that in a tab bar. The footer shows the keys of the current pane.
 
 | Pane         | Shows                                                               | Keys                                  |
@@ -129,6 +129,7 @@ a sidebar with today's numbers, below that in a tab bar. The footer shows the ke
 | 3 Habits     | kind, today, streaks, reward; a 20-week heatmap of the selected habit | as in Today, plus `e` edit, `n` new, `D` delete |
 | 4 Insights   | screen time, opens and average session per app, site or category; hourly chart stacked by habit, category or app; the week in numbers | `j`/`k` choose, `f` filter, `g` by category, `c` category, `r` rename, `[`/`]` earlier/later day, `d` day / 7 days |
 | 5 Lock       | the commitment lock, held-back changes, what it forbids               | `enter` commit/extend, `e` end early  |
+| 6 Books      | your books by status with cover, progress and pace; reading insights (only with `[books]`) | see [Books](#books) |
 
 Everywhere: `s` stops and keeps progress, `c` continues after a round, `a` discards a soft session, `A`
 emergency-aborts, `o` opens settings, `R` reloads the config, `L` jumps to the lock, `q` quits.
@@ -335,6 +336,55 @@ two devices used at the same time count once there, while the table sums them. `
 --device <name>` or `--device all` does the same. Habits and streaks still count this device only. Without sync
 nothing of this shows; the settings (`o`) explain how to set it up.
 
+The [book library](#books) syncs too, once it's in use on a device: books, edits and reading sessions go to
+your other devices (the later edit of a book wins), with the same encryption.
+
+### Books
+
+A book library with reading sessions, taken over from [booktrack](https://github.com/TheYoyoyfreak/booktrack).
+Time is measured by habits: a session of a reading habit becomes a reading session of the book you're reading.
+Turn it on in the config (or with *Book library* in the TUI settings, `o`):
+
+```toml
+[books]
+enabled = true
+habits = ["reading", "book"]   # timer or app habits whose sessions are reading
+```
+
+Which book a session counts for:
+
+1. the book you **pinned**: `m` on a book in the Books pane (before or during the session; the header then shows
+   it next to the session), or `hf books pin dune`; used once;
+2. otherwise the **only** book with status *reading*;
+3. otherwise it waits in the **inbox**: the TUI asks for the book (and the page reached) as soon as the session
+   ends, `I` asks again, or use `hf books inbox`.
+
+Completed and stopped sessions count, aborted ones don't. The page reached goes with the session (`p` sets it
+later), which gives progress, pages per hour and the time left.
+
+In the Books pane: `f`/`F` steps through the statuses (reading, finished, for later, abandoned, all), `i` shows
+reading insights, `/` filters, `n` adds a book, `O` adds one from Open Library, `e` edits, `S` changes the status,
+`d` deletes, `m` pins, `p` sets the page, `g` logs a session you read without a habit, `v` lists the book's
+sessions, `I` opens the inbox, `C` switches covers (picture / pixel art / off), `?` lists the keys. Covers show as
+pictures in kitty, foot (sixel), WezTerm and iTerm2, elsewhere as pixel art; they're cached in
+`~/.cache/habitfocus/covers`.
+
+```sh
+hf books list [-s reading] [-q herbert] [--json]
+hf books add "Dune" -a "Frank Herbert" -p 612 -s reading
+hf books search "der name des windes"            # Open Library; --add 1 -s reading adds a result
+hf books status dune finished
+hf books pin dune                                 # the next reading session is for Dune (--clear)
+hf books page 120                                 # page reached in the latest session [--book …]
+hf books log dune -m 45 -p 150 [--at "2026-10-07 20:30"]
+hf books sessions [dune] [--json]
+hf books stats
+hf books inbox                                    # sessions waiting for a book: assign 1 dune -p 120, discard 1
+hf books import-booktrack [PATH]                  # take over booktrack's library (run once)
+```
+
+The library lives in `~/.local/state/habitfocus/books.db`. Searches and covers need `curl`.
+
 ### The sound when a habit is done
 
 When a timed habit reaches its target — and at every round of a timer habit — habitd plays a short sound. Set it
@@ -397,4 +447,5 @@ settings with `o`).
 - [x] History and streaks
 - [x] Schedules, unlock modes, daily credit expiry, required habits
 - [x] Manual and counter habits, activity log, screen time
+- [x] Book library (from booktrack): reading sessions from habits, Open Library, covers, sync
 - [ ] Anki integration

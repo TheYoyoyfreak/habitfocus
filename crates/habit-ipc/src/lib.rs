@@ -3,6 +3,7 @@
 //! Every request gets one [`Response`] line, except `subscribe`, which is
 //! answered with a stream of [`habit_core::Snapshot`] lines.
 
+pub mod books;
 pub mod update;
 
 use serde::{Deserialize, Serialize};
@@ -118,6 +119,8 @@ pub enum Request {
     SyncNow,
     /// The sync key, for signing in another device.
     SyncKey,
+    /// The book library (`[books]`), handled by habitd's books thread.
+    Books { op: books::BooksOp },
 }
 
 impl Request {
@@ -132,6 +135,11 @@ impl Request {
                 | Request::SyncNow
                 | Request::SyncKey
         )
+    }
+
+    /// Handled by habitd's books thread, off the event loop.
+    pub fn is_books(&self) -> bool {
+        matches!(self, Request::Books { .. })
     }
 }
 
@@ -166,6 +174,9 @@ pub struct Response {
     /// Time at any screen across devices (`app_stats` with `device: "all"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall_clock: Option<habit_core::snapshot::WallClock>,
+    /// Answer of a `books` request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub books: Option<books::BooksReply>,
 }
 
 /// The `device` of the statistics requests that means every device.
@@ -230,6 +241,11 @@ pub fn state_path() -> PathBuf {
 /// The archive (`history.db`) lives next to the state file.
 pub fn archive_path_for(state_path: &std::path::Path) -> PathBuf {
     state_path.with_file_name("history.db")
+}
+
+/// The book library (`books.db`) too.
+pub fn books_path_for(state_path: &std::path::Path) -> PathBuf {
+    state_path.with_file_name("books.db")
 }
 
 pub fn socket_path() -> PathBuf {

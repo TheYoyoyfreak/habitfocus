@@ -27,6 +27,31 @@ pub struct Config {
     /// by tmux session. Labels too.
     #[serde(default)]
     pub category_rules: Vec<CategoryRule>,
+    /// The book library (the Books pane, `hf books`).
+    #[serde(default)]
+    pub books: Books,
+}
+
+/// The book library: books, and reading sessions that come from habits.
+///
+/// ```toml
+/// [books]
+/// enabled = true
+/// habits = ["read"]
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Books {
+    pub enabled: bool,
+    /// Timer and app habits whose sessions are reading sessions of a book.
+    pub habits: Vec<String>,
+}
+
+impl Books {
+    /// Whether sessions of `habit` become reading sessions.
+    pub fn tracks(&self, habit: &str) -> bool {
+        self.enabled && self.habits.iter().any(|h| h == habit)
+    }
 }
 
 /// Puts screen time in a category by pattern:
@@ -752,6 +777,15 @@ impl Config {
             }
         }
         let habit_ids: Vec<String> = self.habits.keys().cloned().collect();
+        for id in &self.books.habits {
+            match self.habits.get(id) {
+                None => return Err(format!("books: unknown habit {id:?}")),
+                Some(h) if !matches!(h.kind, HabitKind::Apps | HabitKind::Timer) => {
+                    return Err(format!("books: habit {id:?} has no sessions (use an apps or timer habit)"));
+                }
+                Some(_) => {}
+            }
+        }
         for (id, group) in &self.groups {
             if let Some(unknown) = group.requires.iter().find(|h| !habit_ids.contains(h)) {
                 return Err(format!("group {id:?}: requires unknown habit {unknown:?}"));
@@ -1128,6 +1162,32 @@ mod tests {
         assert!(group.matches_domain("youtube.com"));
         assert!(group.matches_domain("m.youtube.com"));
         assert!(!group.matches_domain("notyoutube.com"));
+    }
+
+    #[test]
+    fn books_habits_must_have_sessions() {
+        let base = r#"
+            [groups.social]
+            [habits.read]
+            kind = "timer"
+            target = "20m"
+            reward = { groups = ["social"], duration = "1h" }
+            [habits.pushups]
+            kind = "counter"
+            goal = 20
+            reward = { groups = ["social"], duration = "1h" }
+        "#;
+        let config = Config::from_toml(&format!("{base}\n[books]\nenabled = true\nhabits = [\"read\"]")).unwrap();
+        assert!(config.books.tracks("read"));
+        assert!(!config.books.tracks("pushups"));
+        let off = Config::from_toml(&format!("{base}\n[books]\nhabits = [\"read\"]")).unwrap();
+        assert!(!off.books.tracks("read"), "tracks nothing while disabled");
+        assert!(Config::from_toml(base).unwrap().books == Books::default());
+
+        let err = Config::from_toml(&format!("{base}\n[books]\nhabits = [\"nope\"]")).unwrap_err();
+        assert!(err.contains("unknown habit"), "{err}");
+        let err = Config::from_toml(&format!("{base}\n[books]\nhabits = [\"pushups\"]")).unwrap_err();
+        assert!(err.contains("no sessions"), "{err}");
     }
 
     #[test]

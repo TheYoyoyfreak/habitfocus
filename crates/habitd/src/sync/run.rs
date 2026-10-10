@@ -21,12 +21,12 @@ use habit_core::state::{Event, HistoryEntry};
 use serde::{Deserialize, Serialize};
 
 /// Most rows in one record.
-const BATCH_ROWS: usize = 500;
+pub(super) const BATCH_ROWS: usize = 500;
 /// A record stops growing past this much JSON (the server takes 1 MiB, and
 /// sealing adds a third).
-const BATCH_BYTES: usize = 512 * 1024;
+pub(super) const BATCH_BYTES: usize = 512 * 1024;
 /// Records fetched per request.
-const PAGE: u64 = 20;
+pub(super) const PAGE: u64 = 20;
 /// Format of the sealed data.
 const VERSION: &str = "v1";
 
@@ -43,6 +43,8 @@ pub enum SyncError {
     /// The server's data doesn't open with this key.
     Crypto(String),
     Archive(String),
+    /// `books.db` couldn't be read or written.
+    Books(String),
 }
 
 impl std::fmt::Display for SyncError {
@@ -51,6 +53,7 @@ impl std::fmt::Display for SyncError {
             SyncError::Api(e) => write!(f, "{e}"),
             SyncError::Crypto(e) => write!(f, "{e}"),
             SyncError::Archive(e) => write!(f, "history.db: {e}"),
+            SyncError::Books(e) => write!(f, "books.db: {e}"),
         }
     }
 }
@@ -70,8 +73,8 @@ impl From<anyhow::Error> for SyncError {
 /// The decrypted data of a record: rows with their rowid on the device that
 /// wrote them.
 #[derive(Debug, Serialize, Deserialize)]
-struct Batch {
-    rows: Vec<(i64, serde_json::Value)>,
+pub(super) struct Batch {
+    pub rows: Vec<(i64, serde_json::Value)>,
 }
 
 fn aad(record: &WireRecord) -> String {
@@ -108,14 +111,14 @@ fn from_json(table: Table, value: serde_json::Value) -> Option<Record> {
     }
 }
 
-fn seal(key: &Key, device: &Device, table: Table, idx: u64, batch: &Batch) -> WireRecord {
+pub(super) fn seal(key: &Key, device: &Device, tag: &str, idx: u64, batch: &Batch) -> WireRecord {
     let mut record = WireRecord {
         id: uuid::Uuid::now_v7().to_string(),
         idx,
         host: WireHost { id: device.id.clone() },
         timestamp: now_ns(),
         version: VERSION.into(),
-        tag: table.name().into(),
+        tag: tag.into(),
         data: WireData { raw: String::new(), cek: String::new() },
     };
     let plaintext = serde_json::to_vec(batch).expect("batches serialize");
@@ -124,7 +127,7 @@ fn seal(key: &Key, device: &Device, table: Table, idx: u64, batch: &Batch) -> Wi
     record
 }
 
-fn open(key: &Key, record: &WireRecord) -> Result<Batch, SyncError> {
+pub(super) fn open(key: &Key, record: &WireRecord) -> Result<Batch, SyncError> {
     if record.version != VERSION {
         return Err(SyncError::Crypto(format!(
             "a record has format {}; update habitfocus on this device",
@@ -186,7 +189,7 @@ pub fn sync(api: &dyn Api, archive: &mut Archive, key: &Key) -> Result<Summary, 
                 }
                 batch.rows.push((row.rowid, value));
             }
-            api.upload(&[seal(key, &device, table, next, &batch)])?;
+            api.upload(&[seal(key, &device, table.name(), next, &batch)])?;
             cursor = batch.rows.last().expect("not empty").0;
             next += 1;
             summary.sent += batch.rows.len();
@@ -443,7 +446,7 @@ pub mod tests {
         };
         let device = Device { id: "d2".into(), name: "desktop".into() };
         let server = FakeServer::default();
-        server.upload(&[seal(&key, &device, Table::Events, 0, &batch)]).unwrap();
+        server.upload(&[seal(&key, &device, Table::Events.name(), 0, &batch)]).unwrap();
         let mut laptop = Archive::in_memory(&State::default());
         assert_eq!(sync(&server, &mut laptop, &key).unwrap().received, 1);
     }

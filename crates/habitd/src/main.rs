@@ -1,4 +1,5 @@
 mod archive;
+mod books;
 mod config_edit;
 mod heartbeat;
 mod hyprland;
@@ -29,6 +30,10 @@ pub enum Event {
     UpdateChecked(Result<Option<habit_ipc::update::Release>, String>),
     /// How sync goes (`None`: not signed in).
     SyncChanged(Option<habit_core::snapshot::SyncView>),
+    /// How the book library looks, from the books thread.
+    BooksChanged(habit_core::snapshot::BooksView),
+    /// Sync brought changes to the book library.
+    BooksSynced,
 }
 
 /// The compositor whose windows are tracked and closed or focused.
@@ -192,6 +197,8 @@ struct Daemon {
     archive_failing: bool,
     /// `None`: no supported compositor, windows are neither tracked nor closed.
     compositor: Option<Compositor>,
+    /// The books thread, once started.
+    books: Option<std::sync::mpsc::Sender<books::Job>>,
 }
 
 impl Daemon {
@@ -255,6 +262,7 @@ impl Daemon {
             archive,
             archive_failing: false,
             compositor: Compositor::detect(),
+            books: None,
         })
     }
 
@@ -276,9 +284,20 @@ impl Daemon {
         }
     }
 
-    /// Writes what the engine queued for the archive.
+    /// Writes what the engine queued for the archive, and hands finished
+    /// sessions of reading habits to the books thread.
     fn write_archive(&mut self) {
         let records = self.engine.take_archive();
+        if let Some(books) = &self.books {
+            for entry in reading_sessions(&self.engine.config().books, &records) {
+                let _ = books.send(books::Job::HabitSession {
+                    habit: entry.habit.clone(),
+                    started_ms: entry.started_at as i64,
+                    finished_ms: entry.finished_at as i64,
+                    focused_ms: entry.focused_ms as i64,
+                });
+            }
+        }
         let Some(archive) = &mut self.archive else { return };
         match archive.write(&records) {
             Ok(()) => self.archive_failing = false,
@@ -538,6 +557,7 @@ impl Daemon {
             | Request::SyncStatus
             | Request::SyncNow
             | Request::SyncKey => Err("sync requests go to the sync thread".into()),
+            Request::Books { .. } => Err("books requests go to the books thread".into()),
             Request::Lock { until_ms } => {
                 let text = self.config_text.clone();
                 self.engine.lock(until_ms, &text, now).map(|msg| (Vec::new(), Some(msg)))
@@ -592,6 +612,26 @@ fn same_ignoring_time(a: &Snapshot, b: &Snapshot) -> bool {
     *a == b
 }
 
+/// Sessions among `records` that become reading sessions: of a `[books]`
+/// habit, with time that counted (aborted sessions earn nothing, so they
+/// don't count as reading either).
+fn reading_sessions<'a>(
+    books: &'a habit_core::config::Books,
+    records: &'a [habit_core::archive::Record],
+) -> impl Iterator<Item = &'a habit_core::state::HistoryEntry> {
+    use habit_core::state::Outcome;
+    records.iter().filter_map(move |record| match record {
+        habit_core::archive::Record::Session(entry)
+            if books.tracks(&entry.habit)
+                && entry.focused_ms > 0
+                && matches!(entry.outcome, Outcome::Completed | Outcome::Stopped) =>
+        {
+            Some(entry)
+        }
+        _ => None,
+    })
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let socket_path = habit_ipc::socket_path();
@@ -631,8 +671,18 @@ async fn main() -> anyhow::Result<()> {
     // Sync reads and writes history.db through a connection of its own.
     let sync = daemon.archive.is_some().then(|| {
         let archive_path = habit_ipc::archive_path_for(&daemon.state_path);
-        sync::spawn(archive_path, daemon.state_path.with_file_name("sync.json"), tx.clone())
+        sync::spawn(
+            archive_path,
+            habit_ipc::books_path_for(&daemon.state_path),
+            daemon.state_path.with_file_name("sync.json"),
+            tx.clone(),
+        )
     });
+    let device = match &daemon.archive {
+        Some(archive) => books::Device { id: archive.device().id.clone(), name: archive.device().name.clone() },
+        None => books::Device { id: "local".into(), name: archive::hostname() },
+    };
+    daemon.books = Some(books::spawn(habit_ipc::books_path_for(&daemon.state_path), device, tx.clone()));
 
     eprintln!("habitd: listening on {}", socket_path.display());
     loop {
@@ -664,10 +714,29 @@ async fn main() -> anyhow::Result<()> {
                             let _ = reply.send(Response::err("sync is off: history.db can't be opened"));
                         }
                     },
+                    Event::Request(habit_ipc::Request::Books { op }, reply) => {
+                        if !daemon.engine.config().books.enabled {
+                            let _ = reply.send(Response::err(
+                                "the book library is off; turn it on with `enabled = true` under [books] in config.toml",
+                            ));
+                        } else if let Some(books) = &daemon.books {
+                            if let Err(std::sync::mpsc::SendError(books::Job::Request(_, reply))) =
+                                books.send(books::Job::Request(op, reply))
+                            {
+                                let _ = reply.send(Response::err("the books thread stopped; see `journalctl --user -u habitd`"));
+                            }
+                        }
+                    }
                     Event::Request(request, reply) => {
                         let _ = reply.send(daemon.handle_request(request, now));
                     }
                     Event::SyncChanged(view) => daemon.engine.set_sync(view),
+                    Event::BooksChanged(view) => daemon.engine.set_books(view),
+                    Event::BooksSynced => {
+                        if let Some(books) = &daemon.books {
+                            let _ = books.send(books::Job::Changed);
+                        }
+                    }
                     Event::UpdateChecked(result) => {
                         if let Some(update) = update_checker.finished(result) {
                             daemon.engine.set_available_update(update);
@@ -720,4 +789,32 @@ async fn main() -> anyhow::Result<()> {
     let _ = std::fs::remove_file(&socket_path);
     eprintln!("habitd: stopped{}", if clean { " (session ending)" } else { "" });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use habit_core::archive::Record;
+    use habit_core::config::Books;
+    use habit_core::state::{HistoryEntry, Outcome};
+
+    fn session(habit: &str, focused_ms: u64, outcome: Outcome) -> Record {
+        Record::Session(HistoryEntry { habit: habit.into(), started_at: 1, finished_at: 2, focused_ms, outcome })
+    }
+
+    #[test]
+    fn only_counted_sessions_of_book_habits_become_reading() {
+        let books = Books { enabled: true, habits: vec!["read".into()] };
+        let records = [
+            session("read", 60_000, Outcome::Completed),
+            session("read", 30_000, Outcome::Stopped),
+            session("read", 30_000, Outcome::Aborted),
+            session("read", 0, Outcome::Stopped),
+            session("code", 60_000, Outcome::Completed),
+        ];
+        let found: Vec<u64> = reading_sessions(&books, &records).map(|e| e.focused_ms).collect();
+        assert_eq!(found, [60_000, 30_000]);
+        let off = Books { enabled: false, ..books };
+        assert_eq!(reading_sessions(&off, &records).count(), 0);
+    }
 }

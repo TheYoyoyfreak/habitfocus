@@ -6,5 +6,6 @@ license.workspace = true
 
 [dependencies]
 habit-core.workspace = true
+habit-books.workspace = true
 serde.workspace = true
 serde_json.workspace = true

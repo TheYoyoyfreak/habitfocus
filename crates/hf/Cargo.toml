@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 habit-core.workspace = true
 habit-ipc.workspace = true
+habit-books.workspace = true
 anyhow.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap.workspace = true
@@ -14,5 +15,8 @@ serde_json.workspace = true
 ratatui = "0.30"
 ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm"] }
 tiny-skia = "0.12"
-image = { version = "0.25", default-features = false }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 rpassword = "7"
+
+[dev-dependencies]
+habit-books = { workspace = true, features = ["store"] }

@@ -38,6 +38,17 @@ pub fn draw(frame: &mut Frame, app: &App) {
             Pane::Habits => panes::habits(frame, main, app, snapshot),
             Pane::Insights => panes::insights(frame, main, app, snapshot),
             Pane::Lock => panes::lock(frame, main, snapshot),
+            Pane::Books => match &app.books {
+                Some(books) => {
+                    let mut books = books.borrow_mut();
+                    books.covered = app.popup.is_some();
+                    super::books::ui::draw(frame, main, &mut books);
+                }
+                None => {
+                    let waiting = Paragraph::new(" Loading the library…").fg(Color::DarkGray).block(Block::bordered());
+                    frame.render_widget(waiting, main);
+                }
+            },
         },
         None => {
             let waiting = Paragraph::new(" Waiting for habitd… start it with `systemctl --user start habitd`.")
@@ -58,7 +69,18 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let mut spans = Vec::new();
     if let Some(s) = app.session() {
         let color = if s.running { Color::Green } else { Color::Yellow };
-        spans.push(format!("● {} {} / {}   ", s.name, format_duration(s.elapsed_ms), format_duration(s.target_ms)).fg(color));
+        // A reading habit says which book it's for (the pin), if decided.
+        let book = app
+            .snapshot
+            .as_ref()
+            .and_then(|snap| snap.books.as_ref())
+            .filter(|books| books.habits.contains(&s.habit))
+            .map(|books| format!(" · {}", books.pin.as_deref().unwrap_or("book: m in Books")))
+            .unwrap_or_default();
+        spans.push(
+            format!("● {}{book} {} / {}   ", s.name, format_duration(s.elapsed_ms), format_duration(s.target_ms))
+                .fg(color),
+        );
     }
     if let Some(lock) = app.snapshot.as_ref().and_then(|s| s.lock.as_ref()) {
         let text = if lock.end_requested {
@@ -86,7 +108,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 
 fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
     let mut lines = vec![Line::from(""), Line::from(" PANES").fg(Color::DarkGray)];
-    for (i, pane) in Pane::ALL.iter().enumerate() {
+    for (i, pane) in app.panes().iter().enumerate() {
         let line = Line::from(vec![format!(" {} ", i + 1).fg(Color::DarkGray), format!("{:<20}", pane.title()).into()]);
         lines.push(if *pane == app.pane { line.add_modifier(Modifier::REVERSED) } else { line });
     }
@@ -135,7 +157,8 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
-    let spans: Vec<Span> = Pane::ALL
+    let spans: Vec<Span> = app
+        .panes()
         .iter()
         .enumerate()
         .flat_map(|(i, pane)| {
@@ -204,6 +227,12 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
             }
             keys
         }
+        Pane::Books => match &app.books {
+            // Its dialogs bring their own hints; habitfocus keys wait until they close.
+            Some(books) if books.borrow().is_modal() => return super::books::ui::hints(&books.borrow()),
+            Some(books) => super::books::ui::hints(&books.borrow()),
+            None => Vec::new(),
+        },
         Pane::Lock => match app.snapshot.as_ref().and_then(|s| s.lock.as_ref()) {
             Some(lock) if lock.end_requested => vec![("enter", "extend"), ("e", "cancel early end")],
             Some(_) => vec![("enter", "extend"), ("e", "end early (24h)")],
@@ -217,7 +246,7 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         }
         keys.push(("a", "abort"));
     }
-    keys.extend([("1-5", "panes"), ("o", "settings"), ("q", "quit")]);
+    keys.extend([(if app.panes().len() > 5 { "1-6" } else { "1-5" }, "panes"), ("o", "settings"), ("q", "quit")]);
     keys
 }
 

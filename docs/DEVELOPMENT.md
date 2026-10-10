@@ -35,7 +35,7 @@ How the project is built, how the pieces talk to each other, and how to develop,
 ## Repository layout
 
 ```
-Cargo.toml                    workspace: habit-core, habit-ipc, habitd, hf
+Cargo.toml                    workspace: habit-core, habit-ipc, habit-books, habitd, hf
 crates/
   habit-core/                 pure logic, no I/O
     src/archive.rs            records for the archive database (visits, events, sessions)
@@ -48,7 +48,17 @@ crates/
     src/stats.rs              daily totals, streaks, civil dates
     tests/compat.rs           old daemons' snapshots and old state files still load
   habit-ipc/src/lib.rs        Request/Response types, paths, blocking client helpers
+  habit-ipc/src/books.rs      the `books` request (types from habit-books)
   habit-ipc/src/update.rs     latest GitHub release (through curl), version comparison
+  habit-books/src/            the book library; without the `store` feature only model, stats and api types
+    model.rs                  Book, Session, Reading, Pending, Pin; ids of habit sessions
+    stats.rs                  per-book stats and reading insights (pure)
+    api.rs                    BooksOp/BooksReply and, with `store`, how habitd answers them
+    db.rs                     books.db: schema, books, the `rev` change counter (store)
+    sessions.rs inbox.rs      sessions and readings; habit sessions to books, pin, inbox (store)
+    sync.rs                   local changes and last-write-wins merging for sync (store)
+    openlibrary.rs covers.rs  Open Library search, cover cache (curl; store)
+    import.rs                 one-time import of a booktrack database (store)
   habitd/src/
     main.rs                   Daemon struct, event loop, request handling, config/lock loading
     archive.rs                history.db: SQLite schema, import, writes and queries
@@ -62,12 +72,15 @@ crates/
     settings.rs               editing [general] in config.toml with toml_edit
     config_edit.rs            reading and editing [groups.*] / [habits.*] entries for the TUI forms
     heartbeat.rs              boot id, CLOCK_MONOTONIC, shutdown detection
+    books.rs                  books thread: books.db, `books` requests, reading sessions from habits
     sync/mod.rs               sync thread: account (sync.json), schedule, `sync_*` requests
     sync/run.rs               one sync: push this device's archive rows, pull the others'
+    sync/books.rs             the same for books.db's tables, merged last write wins
     sync/api.rs               sync server HTTP API through curl
     sync/crypto.rs            end-to-end encryption of records (XChaCha20-Poly1305)
   hf/src/
     main.rs                   clap CLI, status/stats rendering, `watch --reconnect`
+    books.rs                  `hf books`: the library on the command line
     native_host.rs            browser native messaging host + manifest installer
     setup.rs                  `hf setup`: config, systemd unit for the habitd next to hf, native host
     update.rs                 `hf update`: runs the newest release's install.sh for this prefix
@@ -81,6 +94,8 @@ crates/
     tui/popup.rs              popups over any pane
     tui/editor.rs             block/habit form: fields, rows, keys (no terminal I/O)
     tui/form.rs               drawing of the form, TOML preview and app/site picker
+    tui/books/                the Books pane (booktrack's TUI): state and keys in mod.rs, drawing in ui.rs,
+                              book form, inbox dialog, sessions, insights, covers (picture or pixel art)
 extension/                    WebExtension (Firefox/Zen + Chrome/Brave/Helium), MV3
 tests/extension/              headless browser end-to-end test for the extension
 contrib/                      example config, systemd unit, extension packaging, install.sh,
@@ -388,6 +403,7 @@ JSON lines over a unix socket. Requests are tagged by `cmd` (snake_case):
 | `lock {until_ms}` · `lock_end` · `lock_cancel_end` | commitment lock |
 | `timer_focus {source, focused?}` | from `hf tui` |
 | `browser_tab {source, window?, title?, url?}` · `browser_hello {source, pid}` | from the native host |
+| `books {op}` | the book library, handled by the books thread: `op` is a `BooksOp` (`{"op":"library"}`, `save`, `search`, `assign`, `pin`, …); answered in `Response.books`. Refused while `[books]` is off |
 
 Each request (except `subscribe`) gets one
 `Response { ok, error?, message?, snapshot?, history?, stats?, events?, app_stats?, config?, breakdown?, timeline? }`.
@@ -459,6 +475,20 @@ baseline *before* writing, then writes atomically and reloads.
 - **Heartbeat (`heartbeat.rs`):** `/proc/sys/kernel/random/boot_id`, `clock_gettime(CLOCK_MONOTONIC)` via libc, and
   `systemctl [--user] is-system-running == "stopping"` to recognize logout/shutdown.
 
+### Books (`books.rs`)
+
+The book library (`[books]`, crate `habit-books`). `books::spawn` runs a std thread that owns `books.db` (created on
+first use, next to history.db; WAL, 5 s busy timeout, since the sync thread opens it too). The event loop hands it
+every `books` request (`Request::is_books()`) while `[books] enabled`; searches and cover downloads (curl) block only
+this thread. `Daemon::write_archive` also hands it the finished sessions of `[books] habits` (completed or stopped,
+with focused time): `Db::record_habit_session` books them to the pinned book (once), else the only book being read,
+else the inbox. Their id is a UUIDv5 of `habitfocus:<habit>:<started_ms>`, the same on every device that records
+the session. After each change the thread sends `Event::BooksChanged(BooksView)`; `Engine::set_books` puts it in
+snapshots as `snapshot.books` (seq, inbox count, pinned title, and the habits from the config), `None` while off.
+Clients refetch the library when `seq` moves and compute stats themselves (`habit_books::stats`).
+
+The device id and name in `books.db` rows are the archive's, so books and habit sessions agree on the device.
+
 ### Sync (`sync/`)
 
 Multi-device sync through a [habitfocus sync server](https://github.com/TheYoyoyfreak/habitfocus_sync_server), a fork
@@ -486,6 +516,12 @@ of Atuin's. It is opt-in: nothing happens until `hf sync register` or `hf sync l
   stdin, never on its command line. `run.rs` uses the `Api` trait, which the tests implement with an in-memory server.
 - **Forward compatibility:** rows that don't parse (an event kind from a newer habitfocus) are skipped; tables this
   version doesn't know are left on the server.
+- **Books** (`books.rs`): once `books.db` exists, its tables `books`, `readings` and `reading_sessions` sync after
+  the archive, as logs of the same device with the same sealing. Rows are mutable, so instead of rowids they go out
+  by `rev`, a local change counter (`sync:push:<tag>` = `<next idx>:<last rev>`, `sync:pull:<device>:<tag>` in
+  books.db's settings). Arriving rows are upserted when newer (`updated_at`, then `device_id`) and keep `rev = 0`,
+  so they never go out again. A session whose `external_ref` waits in the inbox here clears it. When rows arrived,
+  `Event::BooksSynced` makes the books thread publish a new `seq`.
 
 - **Status:** the thread sends `Event::SyncChanged(Option<SyncView>)` to the event loop whenever something changes
   (sign in or out, a sync starting or ending, the server going away or coming back); `Engine::set_sync` puts it in
@@ -520,7 +556,7 @@ on the socket, keeping partial lines). Shell plugins run it once.
 ### TUI (`tui/`)
 
 - `app.rs`: `App` holds the latest snapshot, the log, daily stats, screen time, the pane (`Today`, `Blocks`,
-  `Habits`, `Insights`, `Lock`), a habit and a group selection, popup and flash message. `handle_key` returns an
+  `Habits`, `Insights`, `Lock`, and `Books` while `snapshot.books` is there; `App::panes()`), a habit and a group selection, popup and flash message. `handle_key` returns an
   `Action` (`None`, `Quit`, `Send(Request)`): global keys first, then the pane's (`handle_habit_key`,
   `handle_block_key`, `handle_lock_key`). No terminal I/O, so key handling is unit-tested directly. Popups:
   `Unlock`, `ConfirmAbort`, `GoalReached` (opens by itself), `Settings`, `Lock` (duration to commit or extend),
@@ -539,6 +575,14 @@ on the socket, keeping partial lines). Shell plugins run it once.
   `mod.rs` when the form opens) as text, and `rule_from_text` turns text into a rule (`site:` becomes a `url` regex
   that `site_of_pattern` shows as the site again).
   Tests render into ratatui's `TestBackend` and assert on the text.
+- `books/`: the Books pane, booktrack's TUI with its own state (`Books`, in `App::books` behind a `RefCell`, since
+  drawing updates scroll state and picture caches). It talks to habitd through a `Backend` (`Ipc`; tests use a
+  `Local` one over an in-memory `habit_books::Db` with `habit_books::api::handle`). On the pane, `handle_main_key`
+  offers each key to `Books::handle_key` first, which takes its own keys (and every key while one of its dialogs is
+  open) and leaves habitfocus' alone. `App::sync_books` (after each snapshot) opens it, reloads it when
+  `snapshot.books.seq` moves and switches to it when a finished session waits for its book. Searches and covers run
+  on threads; `App::poll_books` picks them up every frame. Pictures go through `App::picker` like the sundial,
+  pixel art otherwise.
 - `mod.rs`: enables focus-change reporting, streams snapshots on a thread (reconnecting), refetches the log, stats
   and screen time when `events_seq` moves, after actions and every 30 s, and runs `FocusReporter`. `FocusState::due` decides when to send `timer_focus`: on every change and
   every 2 s while focused; settings open counts as unfocused. Inside tmux without `focus-events on`, focus reporting
@@ -613,6 +657,8 @@ MV3, one codebase for Firefox-family and Chromium browsers (the manifest has bot
 | `~/.config/habitfocus/config.toml` | user config (`hf init` writes `contrib/config.example.toml`) |
 | `~/.local/state/habitfocus/state.json` | persisted `State` (written atomically via `.tmp` + rename) |
 | `~/.local/state/habitfocus/history.db` | archive: events, sessions, visits, afk, and this device's sync identity (SQLite, WAL mode; `hf paths` prints it) |
+| `~/.local/state/habitfocus/books.db` | the book library (`[books]`; created on first use) |
+| `~/.cache/habitfocus/covers/` | book covers downloaded from Open Library |
 | `~/.local/state/habitfocus/sync.json` | sync account: server, user, session token, sync key (mode 0600; only after `hf sync register`/`login`) |
 | `$XDG_RUNTIME_DIR/habitfocus.sock` | daemon socket |
 | `~/.config/systemd/user/habitd.service` | from `contrib/habitd.service` |

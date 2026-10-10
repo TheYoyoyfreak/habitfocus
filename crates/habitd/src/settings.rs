@@ -1,5 +1,5 @@
-//! Editing `[general]` settings in the config file, preserving its comments
-//! and formatting.
+//! Editing `[general]` settings (and whether the book library is on) in the
+//! config file, preserving its comments and formatting.
 
 use habit_core::Config;
 use std::path::Path;
@@ -16,10 +16,19 @@ pub const EDITABLE: &[&str] = &[
     "terminal_programs",
     "auto_categories",
     "update_check",
+    "books",
 ];
 
 /// Settings that are true or false.
-const SWITCHES: &[&str] = &["notifications", "terminal_programs", "auto_categories", "update_check"];
+const SWITCHES: &[&str] = &["notifications", "terminal_programs", "auto_categories", "update_check", "books"];
+
+/// Where a setting lives: `books` is `enabled` under `[books]`, the rest is in `[general]`.
+fn location(key: &str) -> (&'static str, &str) {
+    match key {
+        "books" => ("books", "enabled"),
+        _ => ("general", key),
+    }
+}
 
 /// Returns the updated config text, validated by parsing it.
 pub fn apply(text: &str, key: &str, raw: &str) -> Result<(String, Config), String> {
@@ -28,20 +37,21 @@ pub fn apply(text: &str, key: &str, raw: &str) -> Result<(String, Config), Strin
     }
     let mut doc: DocumentMut = text.parse().map_err(|e| format!("cannot parse config: {e}"))?;
     let raw = raw.trim();
-    let general = doc
-        .entry("general")
+    let (section, name) = location(key);
+    let table = doc
+        .entry(section)
         .or_insert_with(toml_edit::table)
         .as_table_like_mut()
-        .ok_or("[general] is not a table")?;
+        .ok_or(format!("[{section}] is not a table"))?;
     if SWITCHES.contains(&key) {
         let enabled = match raw {
             "true" | "on" | "yes" => true,
             "false" | "off" | "no" => false,
             _ => return Err(format!("{key} must be true or false")),
         };
-        general.insert(key, value(enabled));
+        table.insert(name, value(enabled));
     } else {
-        general.insert(key, value(raw));
+        table.insert(name, value(raw));
     }
     let updated = doc.to_string();
     let config = Config::from_toml(&updated)?;
@@ -100,6 +110,16 @@ domains = ["reddit.com"]
         assert!(apply(TEXT, "notifications", "maybe").is_err());
         assert!(apply(TEXT, "terminal_programs", "sometimes").is_err());
         assert!(apply(TEXT, "groups", "x").is_err());
+    }
+
+    #[test]
+    fn turns_the_library_on_and_off() {
+        let (updated, config) = apply(TEXT, "books", "on").unwrap();
+        assert!(updated.contains("[books]\nenabled = true"), "{updated}");
+        assert!(config.books.enabled);
+        let (updated, config) = apply(&updated, "books", "off").unwrap();
+        assert!(updated.contains("enabled = false"));
+        assert!(!config.books.enabled);
     }
 
     #[test]

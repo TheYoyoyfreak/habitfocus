@@ -21,10 +21,12 @@ pub enum Pane {
     Habits,
     Insights,
     Lock,
+    /// The book library, while `[books]` is enabled.
+    Books,
 }
 
 impl Pane {
-    pub const ALL: [Pane; 5] = [Pane::Today, Pane::Blocks, Pane::Habits, Pane::Insights, Pane::Lock];
+    pub const ALL: [Pane; 6] = [Pane::Today, Pane::Blocks, Pane::Habits, Pane::Insights, Pane::Lock, Pane::Books];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -33,12 +35,8 @@ impl Pane {
             Pane::Habits => "Habits",
             Pane::Insights => "Insights",
             Pane::Lock => "Lock",
+            Pane::Books => "Books",
         }
-    }
-
-    fn cycle(self, delta: isize) -> Pane {
-        let index = Pane::ALL.iter().position(|&p| p == self).unwrap_or(0) as isize;
-        Pane::ALL[(index + delta).rem_euclid(Pane::ALL.len() as isize) as usize]
     }
 }
 
@@ -89,10 +87,11 @@ pub const SETTINGS: &[Setting] = &[
     Setting { key: "terminal_programs", label: "Screen time per terminal program", hint: "nvim, claude… instead of the terminal; enter toggles" },
     Setting { key: "auto_categories", label: "Group terminals and browsers", hint: "categories Terminal and Browser; enter toggles" },
     Setting { key: "update_check", label: "Check for new versions", hint: "once a day on GitHub; enter toggles" },
+    Setting { key: "books", label: "Book library", hint: "the Books pane; reading habits go in [books] habits; enter toggles" },
 ];
 
 /// Settings that are on or off: enter toggles them.
-const SWITCHES: &[&str] = &["notifications", "terminal_programs", "auto_categories", "update_check"];
+const SWITCHES: &[&str] = &["notifications", "terminal_programs", "auto_categories", "update_check", "books"];
 
 fn on_off(on: bool) -> String {
     if on { "on" } else { "off" }.to_string()
@@ -109,6 +108,7 @@ pub fn setting_value(snapshot: &Snapshot, key: &str) -> String {
         "terminal_programs" => on_off(s.terminal_programs),
         "auto_categories" => on_off(s.auto_categories),
         "update_check" => on_off(s.update_check),
+        "books" => on_off(snapshot.books.is_some()),
         "sound" => s.sound.clone(),
         _ => String::new(),
     }
@@ -184,6 +184,11 @@ pub struct App {
     /// `events_seq` of the last snapshot, to refetch the log when it moves.
     events_seq: Option<u64>,
     flash: Option<Flash>,
+    /// The Books pane, once the library is enabled and reachable. Drawing
+    /// needs it mutable (scroll state, picture caches).
+    pub books: Option<std::cell::RefCell<super::books::Books>>,
+    /// `books.seq` of the last snapshot; `None` makes the next one reload.
+    books_seq: Option<u64>,
 }
 
 impl App {
@@ -216,7 +221,75 @@ impl App {
             dismissed_goal: None,
             events_seq: None,
             flash: None,
+            books: None,
+            books_seq: None,
         }
+    }
+
+    /// The panes in order; Books only while the library is enabled.
+    pub fn panes(&self) -> Vec<Pane> {
+        let books = self.snapshot.as_ref().is_some_and(|s| s.books.is_some());
+        Pane::ALL.into_iter().filter(|p| *p != Pane::Books || books).collect()
+    }
+
+    fn cycle_pane(&mut self, delta: isize) {
+        let panes = self.panes();
+        let index = panes.iter().position(|&p| p == self.pane).unwrap_or(0) as isize;
+        self.pane = panes[(index + delta).rem_euclid(panes.len() as isize) as usize];
+    }
+
+    /// Brings the Books pane up to date with the snapshot: opens it once the
+    /// library is enabled (through `backend`), reloads it when the library
+    /// changed, and shows it when a finished session waits for its book.
+    pub fn sync_books(&mut self, backend: impl FnOnce() -> Box<dyn super::books::Backend>) {
+        let Some(view) = self.snapshot.as_ref().and_then(|s| s.books.clone()) else {
+            self.books = None;
+            self.books_seq = None;
+            if self.pane == Pane::Books {
+                self.pane = Pane::Today;
+            }
+            return;
+        };
+        let live = self.session().filter(|s| view.habits.contains(&s.habit)).map(|s| super::books::Live {
+            habit: s.name.clone(),
+            running: s.running,
+            elapsed_ms: s.elapsed_ms,
+        });
+        let fresh = self.books.is_none();
+        let books = self.books.get_or_insert_with(|| {
+            std::cell::RefCell::new(super::books::Books::new(backend(), self.picker.as_ref()))
+        });
+        let books = books.get_mut();
+        books.live = live;
+        if self.books_seq.replace(view.seq) == Some(view.seq) && !fresh {
+            return;
+        }
+        let asks = if fresh {
+            let waiting = !books.pending.is_empty() && !books.is_modal();
+            if waiting {
+                books.open_assign();
+            }
+            waiting
+        } else {
+            books.refresh()
+        };
+        if asks {
+            self.pane = Pane::Books;
+        }
+        self.take_books_message();
+    }
+
+    /// Shows what the Books pane has to say in the footer.
+    fn take_books_message(&mut self) {
+        if let Some((text, error)) = self.books.as_mut().and_then(|b| b.get_mut().message.take()) {
+            self.set_flash(text, error);
+        }
+    }
+
+    /// Picks up the Books pane's background work (covers, searches); true if
+    /// anything arrived.
+    pub fn poll_books(&mut self) -> bool {
+        self.books.as_mut().is_some_and(|b| b.get_mut().poll_jobs())
     }
 
     /// Stores a new snapshot. Returns true when something was logged since the
@@ -395,7 +468,7 @@ impl App {
             Pane::Today | Pane::Habits => (&mut self.habit_index, snapshot.habits.len()),
             Pane::Blocks => (&mut self.group_index, snapshot.groups.len()),
             Pane::Insights => (&mut self.app_index, insight_rows + 1),
-            Pane::Lock => return,
+            Pane::Lock | Pane::Books => return,
         };
         if len > 0 {
             *index = (*index as isize + delta).clamp(0, len as isize - 1) as usize;
@@ -600,6 +673,20 @@ impl App {
     }
 
     fn handle_main_key(&mut self, key: KeyEvent) -> Action {
+        if self.pane == Pane::Books {
+            if let Some(books) = &mut self.books {
+                let handled = books.get_mut().handle_key(key);
+                self.take_books_message();
+                match handled {
+                    Ok(true) => return Action::None,
+                    Ok(false) => {}
+                    Err(e) => {
+                        self.set_flash(format!("{e:#}"), true);
+                        return Action::None;
+                    }
+                }
+            }
+        }
         if self.pane == Pane::Insights {
             if self.filtering {
                 return self.handle_filter_key(key);
@@ -616,9 +703,13 @@ impl App {
         let has_session = session.is_some();
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return Action::Quit,
-            KeyCode::Char(c @ '1'..='5') => self.pane = Pane::ALL[c as usize - '1' as usize],
-            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => self.pane = self.pane.cycle(1),
-            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => self.pane = self.pane.cycle(-1),
+            KeyCode::Char(c @ '1'..='9') => {
+                if let Some(&pane) = self.panes().get(c as usize - '1' as usize) {
+                    self.pane = pane;
+                }
+            }
+            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => self.cycle_pane(1),
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => self.cycle_pane(-1),
             KeyCode::Char('L') => self.pane = Pane::Lock,
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
@@ -639,6 +730,7 @@ impl App {
                     Pane::Today | Pane::Habits => self.handle_habit_key(key),
                     Pane::Blocks => self.handle_block_key(key),
                     Pane::Lock => self.handle_lock_key(key),
+                    Pane::Books => Action::None,
                     Pane::Insights => self.handle_insights_key(key),
                 }
             }
@@ -819,6 +911,65 @@ pub(crate) mod tests {
         app
     }
 
+    /// The test config with the library on and `book` as its reading habit,
+    /// and a library of two books being read.
+    fn app_with_books() -> (App, habit_books::Db) {
+        let config = format!("{CONFIG}\n[books]\nenabled = true\nhabits = [\"book\"]");
+        let mut engine = Engine::new(Config::from_toml(&config).unwrap(), State::default());
+        engine.set_books(habit_core::snapshot::BooksView { seq: 1, ..Default::default() });
+        let mut app = App::new();
+        app.set_snapshot(engine.snapshot(0));
+        let db = habit_books::Db::open_in_memory().unwrap();
+        for title in ["Dune", "Emma"] {
+            let mut b = habit_books::Book::new(title);
+            b.status = habit_books::Status::Reading;
+            db.save_book(&mut b).unwrap();
+        }
+        (app, db)
+    }
+
+    fn local(db: habit_books::Db) -> impl FnOnce() -> Box<dyn crate::tui::books::Backend> {
+        move || Box::new(crate::tui::books::tests::Local(db))
+    }
+
+    #[test]
+    fn books_pane_only_while_the_library_is_enabled() {
+        let mut plain = app();
+        assert_eq!(plain.panes().len(), 5);
+        plain.handle_key(key(KeyCode::Char('6')));
+        assert_eq!(plain.pane, Pane::Today, "no sixth pane");
+
+        let (mut app, db) = app_with_books();
+        app.sync_books(local(db));
+        assert_eq!(app.panes().last(), Some(&Pane::Books));
+        app.handle_key(key(KeyCode::Char('6')));
+        assert_eq!(app.pane, Pane::Books);
+        // Its keys are its own; habitfocus' still work.
+        assert_eq!(app.handle_key(key(KeyCode::Char('n'))), Action::None);
+        assert!(app.books.as_ref().unwrap().borrow().is_modal(), "n opened the add form");
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.handle_key(key(KeyCode::Char('l'))), Action::None);
+        assert_eq!(app.pane, Pane::Today, "l wraps around to the first pane");
+        app.pane = Pane::Books;
+        assert_eq!(app.handle_key(key(KeyCode::Char('q'))), Action::Quit);
+
+        // Turned off: the pane goes away.
+        app.set_snapshot(engine().snapshot(0));
+        app.sync_books(|| unreachable!());
+        assert!(app.books.is_none());
+        assert_eq!(app.pane, Pane::Today);
+    }
+
+    #[test]
+    fn a_session_waiting_for_its_book_brings_up_the_question() {
+        let (mut app, db) = app_with_books();
+        db.record_habit_session("book", 0, 60_000, 60_000).unwrap();
+        app.sync_books(local(db));
+        assert_eq!(app.pane, Pane::Books);
+        let books = app.books.as_ref().unwrap().borrow();
+        assert!(matches!(books.mode, crate::tui::books::Mode::Assign(_)));
+    }
+
     /// A book timer session that just completed its first 20 minute round.
     pub fn engine_at_goal() -> Engine {
         let mut e = engine();
@@ -955,9 +1106,14 @@ pub(crate) mod tests {
         );
         assert_eq!(app.popup, Some(Popup::Settings { index: 0, editing: None }));
 
-        for _ in 0..10 {
+        for _ in 0..12 {
             app.handle_key(key(KeyCode::Down));
         }
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Action::Send(Request::SetSetting { key: "books".into(), value: "on".into() })
+        );
+        app.handle_key(key(KeyCode::Up));
         assert_eq!(
             app.handle_key(key(KeyCode::Enter)),
             Action::Send(Request::SetSetting { key: "update_check".into(), value: "off".into() })

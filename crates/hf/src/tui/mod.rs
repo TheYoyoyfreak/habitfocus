@@ -5,6 +5,7 @@
 //! few seconds while focused so a killed TUI stops counting.
 
 mod app;
+mod books;
 mod dial;
 mod editor;
 mod form;
@@ -204,6 +205,7 @@ fn event_loop(
                         refresh(app);
                         refreshed = Instant::now();
                     }
+                    app.sync_books(|| Box::new(books::Ipc));
                     if !was_connected {
                         // Re-register focus with a restarted daemon.
                         focus.state.reset();
@@ -217,6 +219,7 @@ fn event_loop(
             refreshed = Instant::now();
         }
         focus.sync(app.pauses_timer());
+        app.poll_books();
 
         terminal.draw(|frame| ui::draw(frame, app))?;
 

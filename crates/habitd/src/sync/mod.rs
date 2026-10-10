@@ -11,6 +11,7 @@
 //! `sync.json` next to state.json, readable only by the user.
 
 mod api;
+mod books;
 mod crypto;
 mod run;
 
@@ -84,6 +85,8 @@ struct LastSync {
 
 struct Syncer {
     archive: Archive,
+    /// The book library, synced too once it exists.
+    books_path: PathBuf,
     account_path: PathBuf,
     account: Option<Account>,
     last: Option<LastSync>,
@@ -100,7 +103,12 @@ struct Syncer {
 
 /// Starts the sync thread. It opens `history.db` itself; the event loop sends
 /// it the `sync_*` requests.
-pub fn spawn(archive_path: PathBuf, account_path: PathBuf, events: tokio::sync::mpsc::Sender<crate::Event>) -> mpsc::Sender<Job> {
+pub fn spawn(
+    archive_path: PathBuf,
+    books_path: PathBuf,
+    account_path: PathBuf,
+    events: tokio::sync::mpsc::Sender<crate::Event>,
+) -> mpsc::Sender<Job> {
     let (tx, rx) = mpsc::channel::<Job>();
     std::thread::spawn(move || {
         let archive = match Archive::open(&archive_path, &State::default()) {
@@ -117,6 +125,7 @@ pub fn spawn(archive_path: PathBuf, account_path: PathBuf, events: tokio::sync::
         let next = account.as_ref().map(|_| Instant::now() + FIRST_SYNC);
         let mut syncer = Syncer {
             archive,
+            books_path,
             account_path,
             account,
             last: None,
@@ -180,6 +189,21 @@ impl Syncer {
             _ => Err("not a sync request".into()),
         };
         result.map_or_else(Response::err, ok)
+    }
+
+    /// Its own connection to `books.db`, if the library is in use here.
+    fn books(&self) -> Option<habit_books::Db> {
+        if !self.books_path.is_file() {
+            return None;
+        }
+        let device = self.archive.device();
+        match habit_books::Db::open(&self.books_path, &device.id, &device.name) {
+            Ok(db) => Some(db),
+            Err(e) => {
+                eprintln!("habitd: can't open {} for sync: {e:#}", self.books_path.display());
+                None
+            }
+        }
     }
 
     fn device(&self) -> DeviceInfo {
@@ -263,6 +287,9 @@ impl Syncer {
             eprintln!("habitd: can't remove {}: {e}", self.account_path.display());
         }
         self.archive.clear_sync_state().map_err(|e| format!("{e:#}"))?;
+        if let Some(books) = self.books() {
+            books.clear_sync_state().map_err(|e| format!("{e:#}"))?;
+        }
         let note = match signed_out {
             Ok(Ok(())) | Ok(Err(ApiError::SignedOut)) => String::new(),
             Ok(Err(e)) => format!("\nThe server wasn't told ({e}); remove the device there later."),
@@ -293,11 +320,26 @@ impl Syncer {
         }
         self.publish_syncing();
         let account = self.account.as_ref().expect("checked");
+        let books = self.books();
+        let device = self.archive.device().clone();
+        let mut books_received = 0;
         let result = account
             .http()
             .and_then(|http| Ok((http, account.key()?)))
             .map_err(SyncError::Archive)
-            .and_then(|(http, key)| run::sync(&http as &dyn Api, &mut self.archive, &key));
+            .and_then(|(http, key)| {
+                let mut summary = run::sync(&http as &dyn Api, &mut self.archive, &key)?;
+                if let Some(db) = &books {
+                    let more = books::sync(&http as &dyn Api, db, &key, &device)?;
+                    books_received = more.received;
+                    summary.sent += more.sent;
+                    summary.received += more.received;
+                }
+                Ok(summary)
+            });
+        if books_received > 0 {
+            let _ = self.events.blocking_send(crate::Event::BooksSynced);
+        }
         let failed_before = self.last.as_ref().is_some_and(|l| l.result.is_err());
         self.next = Some(Instant::now() + EVERY);
         self.next_check = Some(Instant::now() + CHECK_EVERY);

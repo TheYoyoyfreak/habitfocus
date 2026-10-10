@@ -520,7 +520,7 @@ fn migrate(conn: &mut Connection, state: &State) -> anyhow::Result<Device> {
     Ok(device)
 }
 
-fn hostname() -> String {
+pub fn hostname() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname")
         .map(|name| name.trim().to_string())
         .ok()

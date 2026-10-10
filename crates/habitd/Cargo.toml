@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 habit-core.workspace = true
 habit-ipc.workspace = true
+habit-books = { workspace = true, features = ["store"] }
 libc = "0.2"
 anyhow.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

@@ -6,7 +6,7 @@ use crate::duration::{format_duration, format_duration_config, format_duration_l
 use crate::lock::{Lock, END_DELAY_MS};
 use crate::snapshot::{
     AppUsageView, Breakdown, DayView, GroupView, HabitView, HourSlice, LockView, PauseReason, RequirementView,
-    CategoryTime, SessionView, SettingsView, Snapshot, SyncView, Timeline, TimelineAfk, TimelineVisit, UpdateView,
+    BooksView, CategoryTime, SessionView, SettingsView, Snapshot, SyncView, Timeline, TimelineAfk, TimelineVisit, UpdateView,
     WallClock,
 };
 use crate::archive::{self, Afk, AfkReason, Record, Visit};
@@ -183,6 +183,8 @@ pub struct Engine {
     update: Option<UpdateView>,
     /// The sync thread's view of the account (not persisted).
     sync: Option<SyncView>,
+    /// The books thread's view of the library (not persisted).
+    books: BooksView,
     /// Local UTC offset in ms for a given UTC time.
     local_offset: Box<dyn Fn(u64) -> i64 + Send>,
     dirty: bool,
@@ -219,6 +221,7 @@ impl Engine {
             programs: BTreeMap::new(),
             update: None,
             sync: None,
+            books: BooksView::default(),
             tmux_sessions: BTreeMap::new(),
             extension_hosts: BTreeMap::new(),
             unverified_browsers: BTreeMap::new(),
@@ -995,6 +998,11 @@ impl Engine {
         self.sync = sync;
     }
 
+    /// How the book library looks, for snapshots.
+    pub fn set_books(&mut self, books: BooksView) {
+        self.books = books;
+    }
+
     pub fn set_available_update(&mut self, update: Option<UpdateView>) {
         self.update = update;
     }
@@ -1768,6 +1776,11 @@ impl Engine {
             app_categories: self.app_categories_view(),
             update: self.update.clone().filter(|_| self.config.general.update_check),
             sync: self.sync.clone(),
+            books: self
+                .config
+                .books
+                .enabled
+                .then(|| BooksView { habits: self.config.books.habits.clone(), ..self.books.clone() }),
             settings: SettingsView {
                 sound: self.config.general.sound.clone(),
                 day_start: format_time_of_day(self.config.general.day_start),

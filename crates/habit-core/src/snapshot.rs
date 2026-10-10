@@ -44,6 +44,23 @@ pub struct Snapshot {
     /// Multi-device sync, while this device is signed in to a sync server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync: Option<SyncView>,
+    /// The book library, while `[books]` is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub books: Option<BooksView>,
+}
+
+/// The book library at a glance, from habitd's books thread.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BooksView {
+    /// Bumped on every change; clients refetch the library when it moves.
+    pub seq: u64,
+    /// Reading sessions waiting for a book.
+    pub pending: u32,
+    /// Title of the book the next reading session goes to.
+    pub pin: Option<String>,
+    /// Habits whose sessions are reading sessions (`[books] habits`).
+    #[serde(default)]
+    pub habits: Vec<String>,
 }
 
 /// The sync account and how syncing goes, from habitd's sync thread.
