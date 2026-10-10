@@ -2,7 +2,10 @@
 //! TOML it saves on the right, the app/site picker over it.
 
 use super::app::App;
-use super::editor::{rule_from_text, scalar, site_of_pattern, toml_inline, Editor, Kind, Options, Row, Suggest};
+use super::editor::{
+    rule_from_text, scalar, schedule_overnight, schedule_text, site_of_pattern, toml_inline, Editor, Kind, Options, Row,
+    Suggest,
+};
 use super::ui::pane_block;
 use habit_core::duration::format_duration;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
@@ -98,11 +101,7 @@ fn row_line(editor: &Editor, row: &Row, first_of_field: bool, selected: bool) ->
                 spans.extend([dim("◀ "), label.to_string().bold(), dim(" ▶")]);
             }
             Kind::ReadOnly => {
-                let text = match f.key {
-                    "schedule" if editor.value("schedule").is_none() => "all day, every day".to_string(),
-                    "schedule" if !editor.context.schedule.is_empty() => editor.context.schedule.join("; "),
-                    key => editor.value(key).map(toml_inline).unwrap_or_default(),
-                };
+                let text = editor.value(f.key).map(toml_inline).unwrap_or_default();
                 spans.extend([text.into(), dim("  (edit in config.toml)")]);
             }
             _ => match scalar(editor.value(f.key)) {
@@ -110,6 +109,16 @@ fn row_line(editor: &Editor, row: &Row, first_of_field: bool, selected: bool) ->
                 text => spans.push(text.bold()),
             },
         },
+        (Row::Item { .. } | Row::Add { .. }, _) if typing.is_some() => {
+            spans.extend([typing.cloned().unwrap_or_default().bold(), "█".fg(Color::Cyan)]);
+        }
+        (Row::Item { index, .. }, Some(f)) if f.kind == Kind::Schedule => {
+            let rule = editor.items(f.key).get(*index).cloned().unwrap_or_default();
+            spans.extend(["◷ ".fg(Color::Blue), schedule_text(&rule).into()]);
+            if schedule_overnight(&rule) {
+                spans.push(dim("  overnight"));
+            }
+        }
         (Row::Item { index, .. }, Some(f)) if f.kind == Kind::Rules => {
             let rules = editor.value(f.key).and_then(|v| v.as_array()).cloned().unwrap_or_default();
             let rule = rules.get(*index).cloned().unwrap_or_default();
@@ -133,6 +142,12 @@ fn row_line(editor: &Editor, row: &Row, first_of_field: bool, selected: bool) ->
                 "passive" if empty => spans.push("  needs at least one: what counts".fg(Color::Yellow)),
                 _ if empty => spans.push(dim("  none: any window counts")),
                 _ => spans.push(dim("  any of them counts")),
+            }
+        }
+        (Row::Add { .. }, Some(f)) if f.kind == Kind::Schedule => {
+            spans.push(dim("+ add (enter or a)"));
+            if editor.value(f.key).is_none() {
+                spans.push(dim("  none: always blocks"));
             }
         }
         (Row::Add { .. }, _) => spans.push(dim("+ add (enter or a)")),
@@ -168,6 +183,12 @@ fn draw_form(frame: &mut Frame, area: Rect, app: &App, editor: &Editor) {
         notes.push(Line::from(format!(" {error}")).fg(Color::Red));
     } else if editor.saving {
         notes.push(Line::from(dim(" Saving…")));
+    }
+    if editor.row().and_then(|r| editor.field_of(&r)).is_some_and(|f| f.kind == Kind::Schedule) {
+        notes.push(Line::from(dim(
+            " Days and times, e.g. \"mon-fri 23:00-07:00\" or \"sat sun 09:00-12:00 14:00-18:00\" (also weekdays, \
+             weekend, daily). Times ending before they start run into the next day. enter edits, d deletes.",
+        )));
     }
     if app.snapshot.as_ref().is_some_and(|s| s.lock.is_some()) {
         notes.push(Line::from(" Committed: changes that make things easier are refused until the lock ends.").fg(Color::Magenta));

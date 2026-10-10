@@ -140,12 +140,16 @@ one. Move with `j`/`k`, `enter` edits a value, `h`/`l` (or space) changes a choi
 `a` adds an app or site (picked from what you used recently, or typed) and `d` removes one. The right column shows
 what will be written to `config.toml`; `ctrl+s` saves and applies it right away, `esc` closes.
 
+A block's **Schedule** takes typed rules of days and times: `mon-fri 23:00-07:00`, `sat sun 09:00-12:00 14:00-18:00`,
+or `weekdays`, `weekend`, `daily` for the days. `enter` on a rule edits it, `d` removes it; without rules the block
+holds around the clock.
+
 A habit's **Counts in** list holds its allow rules. `a` suggests what you used recently (apps, sites, terminal
 programs) and your tmux sessions, or takes typed words: an app id (`zed`), `site:github.com` (the site and its
 subdomains), `term:nvim`, `tmux:thesis`, or `title:`/`url:` with a regex. Several words make one rule that needs all
 of them, `kitty tmux:work`; separate rules are alternatives. An apps habit without rules counts any window.
 
-habitd writes the file for you and only touches the lines you changed, so your comments stay. Schedules and processes
+habitd writes the file for you and only touches the lines you changed, so your comments stay. Processes
 are shown but still edited in `config.toml`. During a commitment lock the same rules apply as for
 editing the file: changes that make things easier are refused with the reason, stricter ones apply.
 

@@ -316,11 +316,6 @@ impl App {
             habits: snapshot.habits.iter().map(|h| (h.id.clone(), h.name.clone())).collect(),
             groups: snapshot.groups.iter().map(|g| (g.id.clone(), g.name.clone())).collect(),
             recent: self.this_device_apps().iter().map(|a| (a.app.clone(), a.total_ms / 7)).collect(),
-            schedule: id
-                .as_ref()
-                .and_then(|id| snapshot.groups.iter().find(|g| &g.id == id))
-                .map(|g| g.schedule_summary.clone())
-                .unwrap_or_default(),
             app_names: snapshot.app_names.clone(),
             tmux_sessions: Vec::new(),
         };

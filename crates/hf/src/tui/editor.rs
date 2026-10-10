@@ -3,7 +3,8 @@
 //! back with `edit_config`; habitd validates and applies the lock rules. Pure
 //! state and key handling, like `app.rs`; drawing lives in `form.rs`.
 
-use habit_core::duration::parse_duration;
+use habit_core::config::Weekday;
+use habit_core::duration::{format_time_of_day, parse_duration, parse_time_of_day};
 use habit_ipc::Request;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::{Map, Value};
@@ -57,6 +58,9 @@ pub enum Kind {
     /// Allow rules: tables like `{ app = "zed" }`, added from recent use or
     /// typed (`rule_from_text`).
     Rules,
+    /// Schedule rules: tables like `{ days = ["mon"], ranges = ["08:00-12:00"] }`,
+    /// typed as text (`schedule_from_text`).
+    Schedule,
     Multi(Options),
     /// Shown, not editable here.
     ReadOnly,
@@ -81,7 +85,7 @@ const BLOCK_FIELDS: &[Field] = &[
     Field { key: "rest_of_day_price", label: "Day pass price", kind: Kind::Duration { optional: false } },
     Field { key: "requires", label: "Do first", kind: Kind::Multi(Options::Habits) },
     Field { key: "require", label: "Needs", kind: Kind::Choice(REQUIRE) },
-    Field { key: "schedule", label: "Schedule", kind: Kind::ReadOnly },
+    Field { key: "schedule", label: "Schedule", kind: Kind::Schedule },
     Field { key: "processes", label: "Processes", kind: Kind::ReadOnly },
 ];
 
@@ -142,8 +146,6 @@ pub struct Context {
     pub groups: Vec<(String, String)>,
     /// (app id or `site:<host>`, average ms per day).
     pub recent: Vec<(String, u64)>,
-    /// Schedule of the entry, as `GroupView.schedule_summary` renders it.
-    pub schedule: Vec<String>,
     /// Display names of app ids (`[app_names]`).
     pub app_names: std::collections::BTreeMap<String, String>,
     /// tmux sessions that exist right now, suggested for allow rules.
@@ -211,6 +213,93 @@ pub fn rule_from_text(text: &str) -> Result<Map<String, Value>, String> {
         return Err("type an app id, site:…, term:…, tmux:…".into());
     }
     Ok(rule)
+}
+
+const FULL_DAY_NAMES: [&str; 7] = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+
+fn weekday(word: &str) -> Result<usize, String> {
+    Weekday::NAMES
+        .iter()
+        .position(|d| *d == word)
+        .or_else(|| FULL_DAY_NAMES.iter().position(|d| *d == word))
+        .ok_or_else(|| format!("{word:?} isn't a day; use mon, tue, … sun"))
+}
+
+/// Typed text as a schedule rule: days and times in any order. Days are
+/// names (`mon`), spans (`mon-fri`) or `weekdays`, `weekend`, `daily`;
+/// times are `HH:MM-HH:MM`, running into the next day when they end before
+/// they start. Commas are optional: "mon-fri 23:00-07:00".
+pub fn schedule_from_text(text: &str) -> Result<Map<String, Value>, String> {
+    let mut days = Vec::new();
+    let mut ranges = Vec::new();
+    for word in text.to_lowercase().split(|c: char| c.is_whitespace() || c == ',').filter(|w| !w.is_empty()) {
+        if word.contains(':') {
+            let (from, to) =
+                word.split_once('-').ok_or_else(|| format!("{word:?} isn't a time range; write it as 23:00-07:00"))?;
+            let (from, to) = (parse_time_of_day(from)?, parse_time_of_day(to)?);
+            ranges.push(format!("{}-{}", format_time_of_day(from), format_time_of_day(to)));
+            continue;
+        }
+        let span: Vec<usize> = match word {
+            "daily" | "everyday" => (0..7).collect(),
+            "weekdays" => (0..5).collect(),
+            "weekend" | "weekends" => vec![5, 6],
+            _ => match word.split_once('-') {
+                // Spans may wrap around the week: fri-mon.
+                Some((a, b)) => {
+                    let (a, b) = (weekday(a)?, weekday(b)?);
+                    (0..=(b + 7 - a) % 7).map(|i| (a + i) % 7).collect()
+                }
+                None => vec![weekday(word)?],
+            },
+        };
+        days.extend(span);
+    }
+    days.sort_unstable();
+    days.dedup();
+    ranges.dedup();
+    if days.is_empty() || ranges.is_empty() {
+        return Err("a rule needs days and times, e.g. \"mon-fri 23:00-07:00\"".into());
+    }
+    let mut rule = Map::new();
+    rule.insert("days".into(), days.iter().map(|&d| Weekday::NAMES[d]).collect::<Vec<_>>().into());
+    rule.insert("ranges".into(), ranges.into());
+    Ok(rule)
+}
+
+/// A schedule rule as text `schedule_from_text` reads back: "mon-fri 23:00-07:00".
+pub fn schedule_text(rule: &Value) -> String {
+    let mut days: Vec<usize> = strings(rule.get("days")).iter().filter_map(|d| weekday(d).ok()).collect();
+    days.sort_unstable();
+    days.dedup();
+    let mut words = Vec::new();
+    if days.len() == 7 {
+        words.push("daily".to_string());
+    }
+    let mut i = 0;
+    while i < days.len() && days.len() < 7 {
+        // Runs of three or more consecutive days read as a span.
+        let mut end = i;
+        while end + 1 < days.len() && days[end + 1] == days[end] + 1 {
+            end += 1;
+        }
+        if end - i >= 2 {
+            words.push(format!("{}-{}", Weekday::NAMES[days[i]], Weekday::NAMES[days[end]]));
+        } else {
+            words.extend(days[i..=end].iter().map(|&d| Weekday::NAMES[d].to_string()));
+        }
+        i = end + 1;
+    }
+    words.extend(strings(rule.get("ranges")));
+    words.join(" ")
+}
+
+/// Whether a schedule rule has a range that runs past midnight.
+pub fn schedule_overnight(rule: &Value) -> bool {
+    strings(rule.get("ranges")).iter().any(|r| {
+        let mut ends = r.split('-').map(parse_time_of_day);
+        matches!((ends.next(), ends.next()), (Some(Ok(from)), Some(Ok(to))) if to < from)
+    })
 }
 
 /// The `url` regex of `site:<host>`: the host and its subdomains.
@@ -325,6 +414,15 @@ impl Editor {
         strings(self.value(key))
     }
 
+    /// The items of a list field. A schedule may be written as a single table.
+    pub fn items(&self, key: &str) -> Vec<Value> {
+        match self.value(key) {
+            Some(Value::Array(items)) => items.clone(),
+            Some(table @ Value::Object(_)) => vec![table.clone()],
+            _ => Vec::new(),
+        }
+    }
+
     /// Whether a field applies to the entry as it is now (e.g. the day pass
     /// price only for day-pass blocks).
     fn visible(&self, field: &Field) -> bool {
@@ -375,8 +473,8 @@ impl Editor {
                 continue;
             }
             match field.kind {
-                Kind::List(_) | Kind::Rules => {
-                    let items = self.value(field.key).and_then(Value::as_array).map_or(0, Vec::len);
+                Kind::List(_) | Kind::Rules | Kind::Schedule => {
+                    let items = self.items(field.key).len();
                     rows.extend((0..items).map(|index| Row::Item { field: i, index }));
                     rows.push(Row::Add { field: i });
                 }
@@ -514,10 +612,21 @@ impl Editor {
             }
             KeyCode::Up | KeyCode::Char('k') => self.cursor = self.cursor.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => self.cursor = (self.cursor + 1).min(rows.len().saturating_sub(1)),
+            KeyCode::Char('a') if matches!(field.map(|f| f.kind), Some(Kind::Schedule)) => {
+                // Typing on the add row appends a rule.
+                let add = row.as_ref().and_then(|r| match r {
+                    Row::Item { field, .. } | Row::Add { field } => Some(Row::Add { field: *field }),
+                    _ => None,
+                });
+                if let Some(at) = add.and_then(|add| rows.iter().position(|r| *r == add)) {
+                    self.cursor = at;
+                    self.input = Some(String::new());
+                }
+            }
             KeyCode::Char('a') if matches!(field.map(|f| f.kind), Some(Kind::List(_) | Kind::Rules)) => self.open_picker(),
             KeyCode::Char('d') | KeyCode::Delete | KeyCode::Backspace => {
                 if let (Some(Row::Item { index, .. }), Some(field)) = (&row, field) {
-                    let mut items = self.value(field.key).and_then(Value::as_array).cloned().unwrap_or_default();
+                    let mut items = self.items(field.key);
                     if *index < items.len() {
                         items.remove(*index);
                     }
@@ -528,6 +637,11 @@ impl Editor {
                 let back = matches!(key.code, KeyCode::Left | KeyCode::Char('h'));
                 match (&row, field.map(|f| f.kind)) {
                     (Some(Row::Id), _) => self.input = Some(self.id.clone()),
+                    (Some(Row::Add { .. }), Some(Kind::Schedule)) if !back => self.input = Some(String::new()),
+                    (Some(Row::Item { field, index }), Some(Kind::Schedule)) if !back => {
+                        let items = self.items(self.fields()[*field].key);
+                        self.input = Some(items.get(*index).map(schedule_text).unwrap_or_default());
+                    }
                     (Some(Row::Add { .. }), _) => self.open_picker(),
                     (Some(Row::Option { id, .. }), Some(_)) => {
                         let key = field.expect("field").key;
@@ -654,6 +768,21 @@ impl Editor {
             return Ok(());
         }
         let Some(field) = row.as_ref().and_then(|r| self.field_of(r)) else { return Ok(()) };
+        if field.kind == Kind::Schedule {
+            let mut items = self.items(field.key);
+            let rule = if text.is_empty() { None } else { Some(Value::Object(schedule_from_text(text)?)) };
+            match (row, rule) {
+                (Some(Row::Item { index, .. }), Some(rule)) if index < items.len() => items[index] = rule,
+                // Clearing a rule's text removes it.
+                (Some(Row::Item { index, .. }), None) if index < items.len() => {
+                    items.remove(index);
+                }
+                (Some(Row::Add { .. }), Some(rule)) => items.push(rule),
+                _ => return Ok(()),
+            }
+            self.change(field.key, (!items.is_empty()).then(|| items.into()));
+            return Ok(());
+        }
         let value = match field.kind {
             Kind::Text if text.is_empty() => None,
             Kind::Text => Some(Value::from(text)),
@@ -738,7 +867,6 @@ mod tests {
                 ("kitty".into(), 1),
                 ("steam_app_275850".into(), 60_000),
             ],
-            schedule: vec![],
             app_names: [("steam_app_275850".to_string(), "No Man's Sky".to_string())].into(),
             tmux_sessions: vec!["thesis".into()],
         }
@@ -828,8 +956,72 @@ mod tests {
         let table = saved(&mut e);
         assert_eq!(table["requires"], json!(["walk", "read"]));
         assert_eq!(table["require"], "all");
-        assert_eq!(table["schedule"]["ranges"][0], "08:00-12:00", "read-only fields are kept");
+        assert_eq!(table["schedule"]["ranges"][0], "08:00-12:00", "untouched fields are kept as written");
         assert!(e.saving);
+    }
+
+    #[test]
+    fn schedules_read_as_text() {
+        let rule = |text: &str| Value::Object(schedule_from_text(text).unwrap());
+        assert_eq!(rule("mon-fri 23:00-07:00"), json!({ "days": ["mon", "tue", "wed", "thu", "fri"], "ranges": ["23:00-07:00"] }));
+        assert_eq!(rule("Sat, sunday 9:00-12:00, 14:00-18:00")["ranges"], json!(["09:00-12:00", "14:00-18:00"]));
+        assert_eq!(rule("fri-mon 22:00-02:00")["days"], json!(["mon", "fri", "sat", "sun"]), "spans wrap the week");
+        assert_eq!(rule("weekend weekdays 08:00-09:00")["days"].as_array().unwrap().len(), 7);
+        for bad in ["mon-fri", "23:00-07:00", "mo 08:00-09:00", "mon 8-9", "mon 25:00-07:00"] {
+            assert!(schedule_from_text(bad).is_err(), "{bad}");
+        }
+        for (text, shown) in [
+            ("sun-thu 23:00-07:00", "mon-thu sun 23:00-07:00"),
+            ("mon tue 08:00-12:00", "mon tue 08:00-12:00"),
+            ("daily 00:00-00:00", "daily 00:00-00:00"),
+            ("mon wed-fri 08:00-12:00", "mon wed-fri 08:00-12:00"),
+        ] {
+            assert_eq!(schedule_text(&rule(text)), shown);
+            assert_eq!(rule(shown), rule(text), "{shown} reads back");
+        }
+        assert!(schedule_overnight(&rule("mon 23:00-07:00")) && !schedule_overnight(&rule("mon 07:00-23:00")));
+    }
+
+    #[test]
+    fn edits_schedules() {
+        let mut e = block();
+        // A single table in the file shows as one rule.
+        assert!(e.rows().contains(&Row::Item { field: 7, index: 0 }));
+        go_to(&mut e, Row::Item { field: 7, index: 0 });
+        e.handle_key(key(KeyCode::Enter));
+        assert_eq!(e.input.as_deref(), Some("mon 08:00-12:00"));
+        e.handle_key(key(KeyCode::Esc));
+        // `a` on a rule types a new one.
+        e.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(e.row(), Some(Row::Add { field: 7 }));
+        typed(&mut e, "weekdays 23-7");
+        e.handle_key(key(KeyCode::Enter));
+        assert!(e.error.is_some() && e.input.is_some(), "bad times stay in the input");
+        e.input = Some(String::new());
+        typed(&mut e, "weekdays 23:00-7:00");
+        e.handle_key(key(KeyCode::Enter));
+        assert!(e.input.is_none(), "{:?}", e.error);
+        // Editing a rule replaces it.
+        go_to(&mut e, Row::Item { field: 7, index: 0 });
+        e.handle_key(key(KeyCode::Enter));
+        e.input = Some(String::new());
+        typed(&mut e, "sat 10:00-11:00");
+        e.handle_key(key(KeyCode::Enter));
+        let table = saved(&mut e);
+        assert_eq!(
+            table["schedule"],
+            json!([
+                { "days": ["sat"], "ranges": ["10:00-11:00"] },
+                { "days": ["mon", "tue", "wed", "thu", "fri"], "ranges": ["23:00-07:00"] },
+            ])
+        );
+        // Deleting every rule drops the schedule: the block holds around the clock.
+        e.saving = false;
+        go_to(&mut e, Row::Item { field: 7, index: 1 });
+        e.handle_key(key(KeyCode::Char('d')));
+        go_to(&mut e, Row::Item { field: 7, index: 0 });
+        e.handle_key(key(KeyCode::Char('d')));
+        assert!(e.value("schedule").is_none());
     }
 
     #[test]

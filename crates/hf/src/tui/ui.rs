@@ -956,7 +956,7 @@ mod tests {
         let screen = render(&app, 130, 40);
         assert_shows(&screen, &[
             "Edit block · Games", "Apps", "✓ steam", "+ add (enter or a)", "Sites", "Unlock mode", "◀ clock time ▶",
-            "Do first", "[x] Walk", "[ ] Book", "Needs", "all of them", "Schedule", "all day, every day",
+            "Do first", "[x] Walk", "[ ] Book", "Needs", "all of them", "Schedule", "none: always blocks",
             "config.toml", "[groups.games]", r#"apps = ["steam"]"#, "ctrl+s save",
         ]);
         app.handle_key(key(KeyCode::Down));
