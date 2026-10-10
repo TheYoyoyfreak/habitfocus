@@ -108,7 +108,10 @@ pub fn setting_value(snapshot: &Snapshot, key: &str) -> String {
         "terminal_programs" => on_off(s.terminal_programs),
         "auto_categories" => on_off(s.auto_categories),
         "update_check" => on_off(s.update_check),
-        "books" => on_off(snapshot.books.is_some()),
+        "books" => match &snapshot.books {
+            Some(view) if view.hint.is_some() => "on, no reading habit".into(),
+            view => on_off(view.is_some()),
+        },
         "sound" => s.sound.clone(),
         _ => String::new(),
     }
@@ -261,6 +264,7 @@ impl App {
         });
         let books = books.get_mut();
         books.live = live;
+        books.hint = view.hint.clone();
         if self.books_seq.replace(view.seq) == Some(view.seq) && !fresh {
             return;
         }

@@ -1883,7 +1883,11 @@ impl Engine {
                 .config
                 .books
                 .enabled
-                .then(|| BooksView { habits: self.config.books.habits.clone(), ..self.books.clone() }),
+                .then(|| BooksView {
+                    habits: self.config.books.habits.clone(),
+                    hint: self.config.books_hint(),
+                    ..self.books.clone()
+                }),
             settings: SettingsView {
                 sound: self.config.general.sound.clone(),
                 day_start: format_time_of_day(self.config.general.day_start),

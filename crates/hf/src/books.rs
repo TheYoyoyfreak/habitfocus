@@ -164,6 +164,10 @@ fn now_ms() -> i64 {
 }
 
 pub fn run(command: BooksCommand) -> anyhow::Result<()> {
+    // On stderr, so `--json` output stays clean.
+    if let Some(hint) = habit_ipc::request(&Request::Status).ok().and_then(|r| r.snapshot?.books?.hint) {
+        eprintln!("note: {hint}");
+    }
     match command {
         BooksCommand::List { status, query, json } => {
             let books = call(BooksOp::List { status, query })?.books;

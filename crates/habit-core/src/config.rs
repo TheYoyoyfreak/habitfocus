@@ -1000,6 +1000,24 @@ impl Config {
         self.habits.get(id).and_then(|h| h.name.as_deref()).unwrap_or(id)
     }
 
+    /// What to say while the library is on but no habit feeds it: sessions
+    /// then never become reading sessions, which is easy to miss. Suggests a
+    /// timed habit that looks like reading.
+    pub fn books_hint(&self) -> Option<String> {
+        if !self.books.enabled || !self.books.habits.is_empty() {
+            return None;
+        }
+        let timed: Vec<&String> = self.habits.iter().filter(|(_, h)| h.kind.is_timed()).map(|(id, _)| id).collect();
+        let looks_like_reading = |id: &&&String| {
+            let text = format!("{id} {}", self.habit_name(id)).to_lowercase();
+            ["read", "lese", "book", "buch"].iter().any(|w| text.contains(w))
+        };
+        let example = timed.iter().find(looks_like_reading).or(timed.first()).map_or("<habit id>", |id| id.as_str());
+        Some(format!(
+            "No habit counts as reading, so no session reaches a book: add habits = [\"{example}\"] under [books] in config.toml"
+        ))
+    }
+
     pub fn group_name<'a>(&'a self, id: &'a str) -> &'a str {
         self.groups.get(id).and_then(|g| g.name.as_deref()).unwrap_or(id)
     }
@@ -1183,6 +1201,11 @@ mod tests {
         let off = Config::from_toml(&format!("{base}\n[books]\nhabits = [\"read\"]")).unwrap();
         assert!(!off.books.tracks("read"), "tracks nothing while disabled");
         assert!(Config::from_toml(base).unwrap().books == Books::default());
+
+        assert_eq!(config.books_hint(), None);
+        let hint = Config::from_toml(&format!("{base}\n[books]\nenabled = true")).unwrap().books_hint().unwrap();
+        assert!(hint.contains(r#"habits = ["read"]"#), "{hint}");
+        assert_eq!(off.books_hint(), None, "nothing to say while disabled");
 
         let err = Config::from_toml(&format!("{base}\n[books]\nhabits = [\"nope\"]")).unwrap_err();
         assert!(err.contains("unknown habit"), "{err}");

@@ -22,13 +22,17 @@ pub const ACCENT: Color = Color::Cyan;
 pub fn draw(f: &mut Frame, area: Rect, app: &mut Books) {
     app.request_cover();
     let filter = matches!(app.mode, Mode::Search) || !app.query.is_empty();
-    let [tabs, body, footer] = Layout::vertical([
+    let [tabs, hint, body, footer] = Layout::vertical([
         Constraint::Length(1),
+        Constraint::Length(u16::from(app.hint.is_some())),
         Constraint::Min(0),
         Constraint::Length(u16::from(filter)),
     ])
     .areas(area);
     draw_tabs(f, app, tabs);
+    if let Some(text) = &app.hint {
+        f.render_widget(Line::from(format!(" {text} ")).style(Style::new().fg(Color::Black).bg(Color::Yellow)), hint);
+    }
     if app.insights {
         insights::draw(f, app, body);
     } else {
@@ -528,6 +532,16 @@ mod tests {
 
         app.handle_key(key(KeyCode::Char('e'))).unwrap();
         assert!(render(&mut app).contains("Edit book"));
+    }
+
+    #[test]
+    fn shows_the_hint_while_no_habit_feeds_the_library() {
+        let mut app = books_from(Db::open_in_memory().unwrap());
+        assert!(!render(&mut app).contains("No habit counts"));
+        app.hint = Some("No habit counts as reading".into());
+        let screen = render(&mut app);
+        assert!(screen.contains("No habit counts as reading"));
+        assert!(screen.contains("Reading·0"), "the tabs stay");
     }
 
     #[test]

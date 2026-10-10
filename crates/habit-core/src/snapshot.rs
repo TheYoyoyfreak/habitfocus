@@ -61,6 +61,9 @@ pub struct BooksView {
     /// Habits whose sessions are reading sessions (`[books] habits`).
     #[serde(default)]
     pub habits: Vec<String>,
+    /// Set while no habit feeds the library: what to change (`Config::books_hint`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 /// The sync account and how syncing goes, from habitd's sync thread.

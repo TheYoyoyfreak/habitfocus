@@ -100,7 +100,7 @@ impl Library {
             Some(pin) => db.get_book(&pin.book_id)?.map(|b| b.title),
             None => None,
         };
-        Ok(BooksView { seq, pending: db.list_pending()?.len() as u32, pin, habits: Vec::new() })
+        Ok(BooksView { seq, pending: db.list_pending()?.len() as u32, pin, ..Default::default() })
     }
 }
 

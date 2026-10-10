@@ -146,6 +146,8 @@ pub struct Books {
     pub titles: HashMap<String, String>,
     /// A reading-habit session in progress.
     pub live: Option<Live>,
+    /// Set while no habit feeds the library (habitd's `BooksView::hint`).
+    pub hint: Option<String>,
     /// For the footer: text and whether it's an error. hf shows it.
     pub message: Option<(String, bool)>,
 }
@@ -183,6 +185,7 @@ impl Books {
             all_books: Vec::new(),
             titles: HashMap::new(),
             live: None,
+            hint: None,
             message: None,
         };
         books.reload_or_report(None);
