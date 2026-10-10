@@ -236,7 +236,8 @@ mod tests {
     fn session_ids_follow_the_ref() {
         let r = habit_session_ref("read", 1_000);
         assert_eq!(r, "habitfocus:read:1000");
-        assert_eq!(session_id_for_ref(&r), session_id_for_ref(&r));
+        // The mobile app derives the same id; don't change the namespace.
+        assert_eq!(session_id_for_ref(&r), "71edf177-f9d1-5979-8392-bf26776f3a9a");
         assert_ne!(session_id_for_ref(&r), session_id_for_ref(&habit_session_ref("read", 1_001)));
     }
 }

@@ -336,6 +336,10 @@ two devices used at the same time count once there, while the table sums them. `
 --device <name>` or `--device all` does the same. Habits and streaks still count this device only. Without sync
 nothing of this shows; the settings (`o`) explain how to set it up.
 
+On the iPhone, [habitfocus mobile](https://github.com/TheYoyoyfreak/habitfocus_mobile) joins the same account as
+one more device: a habit timer and the book library as a home-screen web app, using the habits the desktop
+publishes with each sync.
+
 The [book library](#books) syncs too, once it's in use on a device: books, edits and reading sessions go to
 your other devices (the later edit of a book wins), with the same encryption.
 
