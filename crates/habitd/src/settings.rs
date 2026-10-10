@@ -17,15 +17,18 @@ pub const EDITABLE: &[&str] = &[
     "auto_categories",
     "update_check",
     "books",
+    "book_rating",
 ];
 
 /// Settings that are true or false.
 const SWITCHES: &[&str] = &["notifications", "terminal_programs", "auto_categories", "update_check", "books"];
 
-/// Where a setting lives: `books` is `enabled` under `[books]`, the rest is in `[general]`.
+/// Where a setting lives: `books` is `enabled` and `book_rating` is `rating`
+/// under `[books]`, the rest is in `[general]`.
 fn location(key: &str) -> (&'static str, &str) {
     match key {
         "books" => ("books", "enabled"),
+        "book_rating" => ("books", "rating"),
         _ => ("general", key),
     }
 }
@@ -101,6 +104,14 @@ domains = ["reddit.com"]
         let (updated, config) = apply(&updated, "auto_categories", "false").unwrap();
         assert!(updated.contains("auto_categories = false"));
         assert!(!config.general.auto_categories);
+    }
+
+    #[test]
+    fn the_rating_scale_goes_under_books() {
+        let (updated, config) = apply(TEXT, "book_rating", "points").unwrap();
+        assert!(updated.contains("[books]\nrating = \"points\""));
+        assert_eq!(config.books.rating, habit_core::config::RatingScale::Points);
+        assert!(apply(TEXT, "book_rating", "smileys").is_err());
     }
 
     #[test]

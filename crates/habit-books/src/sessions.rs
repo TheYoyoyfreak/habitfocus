@@ -57,6 +57,43 @@ impl Db {
         Ok(())
     }
 
+    /// Sets when the book's latest pass was started and finished, opening one
+    /// if it has none (e.g. a book read before it was added). The finish only
+    /// counts for a finished or abandoned book; one being read stays open.
+    pub fn set_dates(&self, book_id: &str, started_at: i64, finished_at: Option<i64>) -> anyhow::Result<Reading> {
+        let Some(book) = self.get_book(book_id)? else { anyhow::bail!("no book {book_id}") };
+        let outcome = match book.status {
+            Status::ForLater => anyhow::bail!("a book for later hasn't been read: change its status first"),
+            Status::Reading => None,
+            Status::Abandoned => finished_at.map(|_| Status::Abandoned),
+            Status::Finished => finished_at.map(|_| Status::Finished),
+        };
+        let finished_at = finished_at.filter(|_| outcome.is_some());
+        if let Some(finished) = finished_at {
+            anyhow::ensure!(finished >= started_at, "a book can't be finished before it was started");
+        }
+        let latest: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM readings WHERE book_id = ?1 AND deleted_at IS NULL ORDER BY started_at DESC LIMIT 1",
+                [book_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let id = latest.unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        let now = now_ms();
+        let rev = self.next_rev()?;
+        self.conn.execute(
+            "INSERT INTO readings (id, book_id, started_at, finished_at, outcome, created_at, updated_at, device_id, rev)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET started_at = excluded.started_at, finished_at = excluded.finished_at,
+                outcome = excluded.outcome, updated_at = MAX(excluded.updated_at, readings.updated_at + 1),
+                device_id = excluded.device_id, rev = excluded.rev",
+            params![id, book_id, started_at, finished_at, outcome.map(Status::as_str), now, self.device_id, rev],
+        )?;
+        Ok(Reading { id, book_id: book_id.to_owned(), started_at, finished_at, outcome })
+    }
+
     pub fn list_readings(&self) -> anyhow::Result<Vec<Reading>> {
         let mut stmt = self.conn.prepare(
             "SELECT r.id, r.book_id, r.started_at, r.finished_at, r.outcome FROM readings r
@@ -271,6 +308,33 @@ mod tests {
         // A re-read opens a second pass.
         db.set_status(&id, Status::Reading).unwrap();
         assert_eq!(db.list_readings().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn dates_go_on_the_latest_pass_or_open_one() {
+        // Read before it was added: the pass is created.
+        let (db, id) = db_with_book(Status::ForLater);
+        assert!(db.set_dates(&id, 1_000, Some(5_000)).is_err(), "not read yet");
+        db.set_status(&id, Status::Finished).unwrap();
+        db.conn.execute("DELETE FROM readings", []).unwrap();
+        let r = db.set_dates(&id, 1_000, Some(5_000)).unwrap();
+        assert_eq!((r.started_at, r.finished_at, r.outcome), (1_000, Some(5_000), Some(Status::Finished)));
+        assert_eq!(db.list_readings().unwrap(), std::slice::from_ref(&r));
+        // Corrected later: the same pass, sent again.
+        let rev: i64 = db.conn.query_row("SELECT rev FROM readings", [], |r| r.get(0)).unwrap();
+        db.set_dates(&id, 2_000, Some(6_000)).unwrap();
+        let again = db.list_readings().unwrap();
+        assert_eq!((again.len(), again[0].id.as_str(), again[0].started_at), (1, r.id.as_str(), 2_000));
+        assert!(db.conn.query_row("SELECT rev FROM readings", [], |r| r.get::<_, i64>(0)).unwrap() > rev);
+        assert!(db.set_dates(&id, 7_000, Some(6_000)).is_err());
+        assert!(db.set_dates("nope", 0, None).is_err());
+
+        // A book being read keeps its pass open; an abandoned one ends abandoned.
+        let (db, id) = db_with_book(Status::Reading);
+        assert_eq!(db.set_dates(&id, 1_000, Some(5_000)).unwrap().finished_at, None);
+        db.set_status(&id, Status::Abandoned).unwrap();
+        assert_eq!(db.set_dates(&id, 1_000, Some(5_000)).unwrap().outcome, Some(Status::Abandoned));
+        assert_eq!(db.list_readings().unwrap().len(), 1);
     }
 
     #[test]

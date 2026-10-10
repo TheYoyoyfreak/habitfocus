@@ -752,7 +752,9 @@ name = "habit-books"
 version = "0.4.1"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
+ "image",
  "rusqlite",
  "serde",
  "serde_json",

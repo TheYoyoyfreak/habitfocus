@@ -1886,6 +1886,7 @@ impl Engine {
                 .then(|| BooksView {
                     habits: self.config.books.habits.clone(),
                     hint: self.config.books_hint(),
+                    rating: self.config.books.rating,
                     ..self.books.clone()
                 }),
             settings: SettingsView {

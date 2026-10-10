@@ -18,12 +18,20 @@ pub enum BooksOp {
         #[serde(default)]
         query: String,
     },
-    /// Open Library search: unsaved books to pick from.
+    /// Open Library and Google Books search: unsaved books to pick from.
     Search { query: String },
     /// Adds or updates a book (a new id adds it).
     Save { book: Box<Book> },
     Delete { id: String },
     SetStatus { id: String, status: Status },
+    /// When the book's latest pass was started and finished (a finish only
+    /// counts for finished and abandoned books; books for later have none).
+    SetDates {
+        book: String,
+        started_at: i64,
+        #[serde(default)]
+        finished_at: Option<i64>,
+    },
     /// Records a session by hand, from the book's current page to `page_to`.
     Log {
         book: String,
@@ -84,7 +92,7 @@ pub struct BooksReply {
     /// The session recorded or changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<Session>,
-    /// Open Library results.
+    /// Search results (Open Library first, then Google Books).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hits: Vec<Book>,
     /// What `import_booktrack` took over.
@@ -101,7 +109,7 @@ pub struct ImportCounts {
     pub pending: usize,
 }
 
-/// Results of an Open Library search.
+/// Results per source of a search.
 #[cfg(feature = "store")]
 const SEARCH_LIMIT: usize = 20;
 
@@ -111,7 +119,7 @@ const SEARCH_LIMIT: usize = 20;
 #[cfg(feature = "store")]
 pub fn handle(db: &crate::Db, op: BooksOp) -> anyhow::Result<BooksReply> {
     use crate::import::booktrack_path;
-    use crate::{covers, openlibrary};
+    use crate::{covers, googlebooks, openlibrary};
     use std::path::PathBuf;
 
     let mut reply = BooksReply::default();
@@ -126,11 +134,27 @@ pub fn handle(db: &crate::Db, op: BooksOp) -> anyhow::Result<BooksReply> {
         }
         BooksOp::List { status, query } => reply.books = db.list_books(status, &query)?,
         BooksOp::Search { query } => {
-            reply.hits = openlibrary::search(&query, SEARCH_LIMIT)?.iter().map(|hit| hit.to_book()).collect();
+            // Both at once; either one alone is enough.
+            let (ol, gb) = std::thread::scope(|s| {
+                let gb = s.spawn(|| googlebooks::search(&query, SEARCH_LIMIT));
+                let ol = openlibrary::search(&query, SEARCH_LIMIT);
+                (ol, gb.join().unwrap_or_else(|_| Err(anyhow::anyhow!("Google Books search crashed"))))
+            });
+            reply.hits = match (ol, gb) {
+                (Err(e), Err(_)) => return Err(e),
+                (ol, gb) => googlebooks::merge(
+                    ol.map(|h| h.iter().map(openlibrary::Hit::to_book).collect()).unwrap_or_default(),
+                    gb.map(|h| h.iter().map(googlebooks::Volume::to_book).collect()).unwrap_or_default(),
+                ),
+            };
         }
         BooksOp::Save { book } => {
             let mut book = *book;
             anyhow::ensure!(!book.title.trim().is_empty(), "a book needs a title");
+            // A cover from a local file goes in the book, so other devices see it.
+            if let Some(url) = book.cover_url.clone().filter(|u| covers::is_local(u)) {
+                book.cover_url = Some(covers::embed(&covers::path(&url))?);
+            }
             db.save_book(&mut book)?;
             reply.book = Some(book);
         }
@@ -145,6 +169,9 @@ pub fn handle(db: &crate::Db, op: BooksOp) -> anyhow::Result<BooksReply> {
             session.page_to = page_to;
             db.add_session(&session)?;
             reply.session = Some(session);
+        }
+        BooksOp::SetDates { book, started_at, finished_at } => {
+            reply.readings = vec![db.set_dates(&book, started_at, finished_at)?];
         }
         BooksOp::DeleteSession { id } => anyhow::ensure!(db.delete_session(&id)?, "no such session"),
         BooksOp::SetPage { book, page } => {
@@ -194,6 +221,9 @@ mod tests {
         assert_eq!((all.books.len(), all.sessions.len(), all.readings.len()), (1, 1, 1));
         assert!(handle(&db, BooksOp::Save { book: Box::new(Book::new("  ")) }).is_err());
         assert!(handle(&db, BooksOp::Pin { book: Some("nope".into()) }).is_err());
-        assert!(handle(&db, BooksOp::Log { book: dune.id, started_at: 10, ended_at: 0, page_to: None }).is_err());
+        assert!(handle(&db, BooksOp::Log { book: dune.id.clone(), started_at: 10, ended_at: 0, page_to: None }).is_err());
+        let set = handle(&db, BooksOp::SetDates { book: dune.id, started_at: 5, finished_at: None }).unwrap();
+        assert_eq!(set.readings.len(), 1);
+        assert_eq!(handle(&db, BooksOp::Library).unwrap().readings[0].started_at, 5);
     }
 }

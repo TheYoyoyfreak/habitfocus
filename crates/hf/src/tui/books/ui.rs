@@ -13,7 +13,7 @@ use ratatui::Frame;
 use ratatui_image::Resize;
 
 use super::cover::{self, Cover, CoverMode, PixelArt};
-use super::form::{stars, Field, Form};
+use super::form::{rating_label, Field, Form};
 use super::reading::{LogForm, LOG_LABELS};
 use super::{inbox, insights, tab_label, Books, Mode, Online, OnlineState, TABS};
 
@@ -100,7 +100,7 @@ fn draw_tabs(f: &mut Frame, app: &Books, area: Rect) {
 fn draw_table(f: &mut Frame, app: &mut Books, area: Rect) {
     let block = Block::bordered().title(format!(" {} ", tab_label(app.tab_status())));
     if app.books.is_empty() {
-        let hint = if app.query.is_empty() { "No books here yet. n adds one, O finds one on Open Library." } else { "No matches." };
+        let hint = if app.query.is_empty() { "No books here yet. n adds one, O finds one online." } else { "No matches." };
         f.render_widget(Paragraph::new(hint).dim().block(block), area);
         return;
     }
@@ -113,7 +113,7 @@ fn draw_table(f: &mut Frame, app: &mut Books, area: Rect) {
         Row::new([
             Cell::from(Line::from(vec![mark, Span::raw(b.title.as_str())])),
             Cell::from(b.author.as_deref().unwrap_or("")).style(Style::new().fg(Color::Gray)),
-            Cell::from(if b.rating > 0 { stars(b.rating) } else { String::new() }).style(Color::Yellow),
+            Cell::from(if b.score > 0 { rating_label(b.score, app.rating) } else { String::new() }).style(Color::Yellow),
         ])
     });
     let table = Table::new(rows, [Constraint::Fill(3), Constraint::Fill(2), Constraint::Length(6)])
@@ -151,7 +151,12 @@ fn draw_detail(f: &mut Frame, app: &mut Books, area: Rect) {
     }
     lines.push(Line::default());
     lines.push(field("Status", b.status.label().to_owned()).style(status_color(b.status)));
-    lines.push(field("Rating", stars(b.rating)));
+    lines.push(field("Rating", rating_label(b.score, app.rating)));
+    match app.dates_of(b) {
+        (Some(started), Some(finished)) => lines.push(field("Read", format!("{} – {}", date(started), date(finished)))),
+        (Some(started), None) if b.status != Status::ForLater => lines.push(field("Started", date(started))),
+        _ => {}
+    }
     let st = app.book_stats(&b.id, b.pages);
     if let (Some(cur), Some(total)) = (st.current_page, b.pages.filter(|p| *p > 0)) {
         let ratio = (f64::from(cur) / f64::from(total)).min(1.0);
@@ -167,7 +172,7 @@ fn draw_detail(f: &mut Frame, app: &mut Books, area: Rect) {
     }
     if st.sessions > 0 {
         let plural = if st.sessions == 1 { "" } else { "s" };
-        lines.push(field("Read", format!("{} in {} session{plural}", format_duration(st.total_ms), st.sessions)));
+        lines.push(field("Time", format!("{} in {} session{plural}", format_duration(st.total_ms), st.sessions)));
     }
     if let Some(pace) = st.pace_pph {
         let left = st.remaining_ms.filter(|ms| *ms > 0).map(|ms| format!(" · ~{} left", format_duration(ms)));
@@ -241,7 +246,7 @@ fn draw_online(f: &mut Frame, app: &mut Books) {
     let screen = f.area();
     let area = popup(screen, screen.width.saturating_sub(4).min(100), screen.height.saturating_sub(2).min(26));
     f.render_widget(Clear, area);
-    let block = Block::bordered().title(" Search Open Library ").border_style(ACCENT);
+    let block = Block::bordered().title(" Search Open Library and Google Books ").border_style(ACCENT);
     let inner = block.inner(area);
     f.render_widget(block, area);
     let Mode::Online(online) = &app.mode else { return };
@@ -281,7 +286,13 @@ fn draw_online(f: &mut Frame, app: &mut Books) {
                         first.push(" ✓ in library".fg(Color::Green));
                     }
                     let year = h.pub_year.map(|y| format!("({y})"));
-                    let second = format!("  {}", [h.author.clone(), year].into_iter().flatten().collect::<Vec<_>>().join(" "));
+                    let google = h
+                        .olid
+                        .as_deref()
+                        .is_some_and(|id| id.starts_with(habit_books::googlebooks::ID_PREFIX))
+                        .then(|| "· Google Books".to_string());
+                    let second =
+                        format!("  {}", [h.author.clone(), year, google].into_iter().flatten().collect::<Vec<_>>().join(" "));
                     let item = ListItem::new(vec![Line::from(first), Line::from(second.dim())]);
                     if i == *selected { item.style(Style::new().bg(Color::DarkGray)) } else { item }
                 })
@@ -344,12 +355,13 @@ fn draw_form(f: &mut Frame, form: &Form) {
                 if focused { Style::new().fg(ACCENT).bold() } else { Style::new().dim() },
             );
             let value = form.value(i);
+            let placeholder = Span::from(if value.is_empty() { field.placeholder() } else { "" }).dim();
             let value = match (focused, field.is_choice()) {
                 (true, true) => format!("‹ {value} ›"),
                 (true, false) => format!("{value}█"),
                 _ => value,
             };
-            Line::from(vec![label, Span::raw(value)])
+            Line::from(vec![label, Span::raw(value), placeholder])
         })
         .collect();
     lines.push(Line::default());
@@ -454,7 +466,7 @@ fn draw_help(f: &mut Frame) {
         ("j/k home/end", "move"),
         ("/", "filter library"),
         ("n", "add a book"),
-        ("O", "add from Open Library"),
+        ("O", "add from Open Library or Google Books"),
         ("e enter", "edit book"),
         ("S", "change status"),
         ("d", "delete book"),
@@ -520,7 +532,7 @@ mod tests {
         let mut b = Book::new("Dune");
         b.author = Some("Frank Herbert".into());
         b.status = Status::Reading;
-        b.rating = 4;
+        b.score = 8;
         db.save_book(&mut b).unwrap();
         let mut app = books_from(db);
 

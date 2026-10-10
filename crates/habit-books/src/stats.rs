@@ -20,6 +20,9 @@ pub struct BookStats {
     /// Estimated time to finish at that pace.
     pub remaining_ms: Option<i64>,
     pub last_read: Option<i64>,
+    /// When the first session started: with `last_read`, when the book was
+    /// read according to its sessions.
+    pub first_read: Option<i64>,
 }
 
 /// Stats for one book; `sessions` are that book's.
@@ -39,6 +42,7 @@ pub fn book_stats(pages: Option<u32>, sessions: &[Session]) -> BookStats {
     }
     st.current_page = sessions.iter().filter(|s| s.page_to.is_some()).max_by_key(|s| s.ended_at).and_then(|s| s.page_to);
     st.last_read = sessions.iter().map(|s| s.ended_at).max();
+    st.first_read = sessions.iter().map(|s| s.started_at).min();
     // Below a minute of timed reading the pace is noise.
     if paced_pages > 0 && paced_ms >= 60_000 {
         let pace = f64::from(paced_pages) / (paced_ms as f64 / HOUR_MS);

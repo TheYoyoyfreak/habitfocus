@@ -88,6 +88,7 @@ pub const SETTINGS: &[Setting] = &[
     Setting { key: "auto_categories", label: "Group terminals and browsers", hint: "categories Terminal and Browser; enter toggles" },
     Setting { key: "update_check", label: "Check for new versions", hint: "once a day on GitHub; enter toggles" },
     Setting { key: "books", label: "Book library", hint: "the Books pane; reading habits go in [books] habits; enter toggles" },
+    Setting { key: "book_rating", label: "Book ratings", hint: "five stars or ten points, on every device; enter toggles" },
 ];
 
 /// Settings that are on or off: enter toggles them.
@@ -112,6 +113,7 @@ pub fn setting_value(snapshot: &Snapshot, key: &str) -> String {
             Some(view) if view.hint.is_some() => "on, no reading habit".into(),
             view => on_off(view.is_some()),
         },
+        "book_rating" => snapshot.books.as_ref().map_or_else(Default::default, |b| b.rating).as_str().to_string(),
         "sound" => s.sound.clone(),
         _ => String::new(),
     }
@@ -265,6 +267,7 @@ impl App {
         let books = books.get_mut();
         books.live = live;
         books.hint = view.hint.clone();
+        books.rating = view.rating;
         if self.books_seq.replace(view.seq) == Some(view.seq) && !fresh {
             return;
         }
@@ -639,8 +642,12 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => index = (index + 1).min(SETTINGS.len() - 1),
             KeyCode::Enter => {
                 let current = self.snapshot.as_ref().map(|s| setting_value(s, setting.key)).unwrap_or_default();
-                if SWITCHES.contains(&setting.key) {
-                    let toggled = if current == "on" { "off" } else { "on" };
+                if setting.key == "book_rating" {
+                    let toggled = if current == "points" { "stars" } else { "points" };
+                    action = Action::Send(Request::SetSetting { key: setting.key.to_string(), value: toggled.to_string() });
+                } else if SWITCHES.contains(&setting.key) {
+                    // "on, no reading habit" is on too.
+                    let toggled = if current.starts_with("on") { "off" } else { "on" };
                     action = Action::Send(Request::SetSetting {
                         key: setting.key.to_string(),
                         value: toggled.to_string(),
@@ -1113,6 +1120,11 @@ pub(crate) mod tests {
         for _ in 0..12 {
             app.handle_key(key(KeyCode::Down));
         }
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Action::Send(Request::SetSetting { key: "book_rating".into(), value: "points".into() })
+        );
+        app.handle_key(key(KeyCode::Up));
         assert_eq!(
             app.handle_key(key(KeyCode::Enter)),
             Action::Send(Request::SetSetting { key: "books".into(), value: "on".into() })

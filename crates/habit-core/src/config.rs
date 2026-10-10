@@ -38,6 +38,8 @@ pub struct Config {
 /// [books]
 /// enabled = true
 /// habits = ["read"]
+/// rating = "points"           # or "stars" (the default)
+/// google_books_key = "AIza…"  # optional, for Google Books searches
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -45,6 +47,30 @@ pub struct Books {
     pub enabled: bool,
     /// Timer and app habits whose sessions are reading sessions of a book.
     pub habits: Vec<String>,
+    /// How ratings (out of 10) are shown and entered, on every device.
+    pub rating: RatingScale,
+    /// A Google Books API key. Searches without one share a quota that is
+    /// often used up. Reaches the mobile app with the habits summary.
+    pub google_books_key: Option<String>,
+}
+
+/// Ratings are kept out of 10 and shown as five stars (halves included) or as
+/// points.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RatingScale {
+    #[default]
+    Stars,
+    Points,
+}
+
+impl RatingScale {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RatingScale::Stars => "stars",
+            RatingScale::Points => "points",
+        }
+    }
 }
 
 impl Books {

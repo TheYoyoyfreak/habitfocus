@@ -86,10 +86,17 @@ const MIGRATIONS: &[&str] = &["CREATE TABLE settings (
         external_ref TEXT NOT NULL UNIQUE,
         created_at   INTEGER NOT NULL,
         discarded_at INTEGER
-    );"];
+    );",
+    // Ratings out of 10 (`rating` stays, out of 5, for older habitfocus). Rows
+    // without a score (older devices) fall back to twice their rating.
+    "ALTER TABLE books ADD COLUMN score INTEGER;"];
 
 const BOOK_COLUMNS: &str = "id, title, subtitle, author, isbn, olid, pages, pub_year, format, status, \
-                            rating, tags, notes, cover_url, created_at, updated_at";
+                            rating, tags, notes, cover_url, created_at, updated_at, score";
+
+/// [`BOOK_COLUMNS`] as read back.
+const BOOK_SELECT: &str = "id, title, subtitle, author, isbn, olid, pages, pub_year, format, status, \
+                           COALESCE(score, rating * 2), tags, notes, cover_url, created_at, updated_at";
 
 pub struct Db {
     pub(crate) conn: Connection,
@@ -154,12 +161,12 @@ impl Db {
         self.conn.execute(
             &format!(
                 "INSERT INTO books ({BOOK_COLUMNS}, deleted_at, device_id, rev)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, NULL, ?17, ?18)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?19, NULL, ?17, ?18)
                  ON CONFLICT(id) DO UPDATE SET
                     title = excluded.title, subtitle = excluded.subtitle, author = excluded.author,
                     isbn = excluded.isbn, olid = excluded.olid, pages = excluded.pages,
                     pub_year = excluded.pub_year, format = excluded.format, status = excluded.status,
-                    rating = excluded.rating, tags = excluded.tags, notes = excluded.notes,
+                    rating = excluded.rating, score = excluded.score, tags = excluded.tags, notes = excluded.notes,
                     cover_url = excluded.cover_url, updated_at = excluded.updated_at,
                     deleted_at = NULL, device_id = excluded.device_id, rev = excluded.rev"
             ),
@@ -174,7 +181,7 @@ impl Db {
                 book.pub_year,
                 book.format.as_str(),
                 book.status.as_str(),
-                book.rating,
+                book.score.div_ceil(2),
                 book.tags.join(","),
                 book.notes,
                 book.cover_url,
@@ -182,6 +189,7 @@ impl Db {
                 book.updated_at,
                 self.device_id,
                 rev,
+                book.score,
             ],
         )?;
         if before != Some(book.status) {
@@ -223,7 +231,7 @@ impl Db {
     }
 
     pub fn get_book(&self, id: &str) -> anyhow::Result<Option<Book>> {
-        let sql = format!("SELECT {BOOK_COLUMNS} FROM books WHERE id = ?1 AND deleted_at IS NULL");
+        let sql = format!("SELECT {BOOK_SELECT} FROM books WHERE id = ?1 AND deleted_at IS NULL");
         Ok(self.conn.query_row(&sql, [id], book_from_row).optional()?)
     }
 
@@ -232,7 +240,7 @@ impl Db {
     pub fn list_books(&self, status: Option<Status>, query: &str) -> anyhow::Result<Vec<Book>> {
         let pattern = format!("%{}%", query.trim().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
         let sql = format!(
-            "SELECT {BOOK_COLUMNS} FROM books
+            "SELECT {BOOK_SELECT} FROM books
              WHERE deleted_at IS NULL
                AND (?1 IS NULL OR status = ?1)
                AND (title LIKE ?2 ESCAPE '\\' OR IFNULL(author, '') LIKE ?2 ESCAPE '\\'
@@ -289,7 +297,7 @@ fn book_from_row(r: &Row) -> rusqlite::Result<Book> {
         pub_year: r.get(7)?,
         format: Format::parse(&format).unwrap_or(Format::Paperback),
         status: Status::parse(&status).unwrap_or(Status::ForLater),
-        rating: r.get(10)?,
+        score: r.get(10)?,
         tags: tags.split(',').filter(|t| !t.is_empty()).map(str::to_owned).collect(),
         notes: r.get(12)?,
         cover_url: r.get(13)?,
@@ -317,7 +325,7 @@ mod tests {
         b.pages = Some(612);
         b.pub_year = Some(1965);
         b.format = Format::Ebook;
-        b.rating = 5;
+        b.score = 7;
         b.tags = vec!["scifi".into(), "classic".into()];
         b.notes = Some("spice".into());
         db.save_book(&mut b).unwrap();

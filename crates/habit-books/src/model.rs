@@ -80,8 +80,9 @@ pub struct Book {
     pub pub_year: Option<i32>,
     pub format: Format,
     pub status: Status,
-    /// 0 = unrated, otherwise 1..=5.
-    pub rating: u8,
+    /// 0 = unrated, otherwise 1..=10: points, or half stars when shown as
+    /// five stars.
+    pub score: u8,
     pub tags: Vec<String>,
     pub notes: Option<String>,
     pub cover_url: Option<String>,
@@ -102,7 +103,7 @@ impl Book {
             pub_year: None,
             format: Format::Paperback,
             status: Status::ForLater,
-            rating: 0,
+            score: 0,
             tags: Vec::new(),
             notes: None,
             cover_url: None,

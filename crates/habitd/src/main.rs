@@ -723,6 +723,7 @@ async fn main() -> anyhow::Result<()> {
                                 "the book library is off; turn it on with `enabled = true` under [books] in config.toml",
                             ));
                         } else if let Some(books) = &daemon.books {
+                            habit_books::googlebooks::set_key(daemon.engine.config().books.google_books_key.clone());
                             if let Err(std::sync::mpsc::SendError(books::Job::Request(_, reply))) =
                                 books.send(books::Job::Request(op, reply))
                             {
@@ -813,7 +814,7 @@ mod tests {
 
     #[test]
     fn only_counted_sessions_of_book_habits_become_reading() {
-        let books = Books { enabled: true, habits: vec!["read".into()] };
+        let books = Books { enabled: true, habits: vec!["read".into()], ..Default::default() };
         let records = [
             session("read", 60_000, Outcome::Completed),
             session("read", 30_000, Outcome::Stopped),

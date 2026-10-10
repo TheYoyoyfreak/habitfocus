@@ -69,7 +69,7 @@ pub enum Mode {
     Help,
 }
 
-/// Open Library search popup.
+/// Online search popup (Open Library and Google Books).
 pub struct Online {
     pub query: String,
     pub state: OnlineState,
@@ -80,7 +80,7 @@ pub struct Online {
 pub enum OnlineState {
     Typing,
     Loading,
-    /// `owned`: Open Library ids already in the library.
+    /// `owned`: Open Library and Google Books ids already in the library.
     Results { hits: Vec<Book>, selected: usize, owned: HashSet<String> },
     Error(String),
 }
@@ -148,6 +148,8 @@ pub struct Books {
     pub live: Option<Live>,
     /// Set while no habit feeds the library (habitd's `BooksView::hint`).
     pub hint: Option<String>,
+    /// How ratings are shown (`[books] rating`).
+    pub rating: habit_core::config::RatingScale,
     /// For the footer: text and whether it's an error. hf shows it.
     pub message: Option<(String, bool)>,
 }
@@ -186,6 +188,7 @@ impl Books {
             titles: HashMap::new(),
             live: None,
             hint: None,
+            rating: Default::default(),
             message: None,
         };
         books.reload_or_report(None);
@@ -326,13 +329,30 @@ impl Books {
                 KeyCode::Enter => {
                     let mut book = hits[*selected].clone();
                     book.status = self.tab_status().unwrap_or(Status::ForLater);
-                    self.mode = Mode::Form(Box::new(Form::new(book, true)));
+                    self.mode = Mode::Form(Box::new(self.form(book, true)));
                     return;
                 }
                 _ => {}
             },
         }
         self.mode = Mode::Online(online);
+    }
+
+    /// The add/edit form for `book`, with its reading dates and the rating scale.
+    fn form(&self, book: Book, is_new: bool) -> Form {
+        let (started, finished) = self.dates_of(&book);
+        Form::new(book, is_new).with_scale(self.rating).with_dates(started, finished)
+    }
+
+    /// When `book` was started and finished: its latest pass, or else what
+    /// its sessions say.
+    pub fn dates_of(&self, book: &Book) -> (Option<i64>, Option<i64>) {
+        if let Some(r) = self.readings.iter().filter(|r| r.book_id == book.id).max_by_key(|r| r.started_at) {
+            return (Some(r.started_at), r.finished_at);
+        }
+        let st = self.book_stats(&book.id, book.pages);
+        let done = matches!(book.status, Status::Finished | Status::Abandoned);
+        (st.first_read, st.last_read.filter(|_| done))
     }
 
     /// Re-reads the library, showing what went wrong instead of failing.
@@ -389,11 +409,14 @@ impl Books {
             Mode::Form(mut form) => match form.handle_key(key) {
                 FormOutcome::Continue => self.mode = Mode::Form(form),
                 FormOutcome::Cancel => {}
-                FormOutcome::Save(book) => {
+                FormOutcome::Save(book, dates) => {
                     let book = self
                         .call(BooksOp::Save { book })?
                         .book
                         .ok_or_else(|| anyhow::anyhow!("habitd didn't save the book"))?;
+                    if let Some((started_at, finished_at)) = dates {
+                        self.call(BooksOp::SetDates { book: book.id.clone(), started_at, finished_at })?;
+                    }
                     self.set_message(format!("Saved “{}”", book.title));
                     // Follow the book to its tab so it stays in view.
                     if self.tab_status().is_some_and(|s| s != book.status) {
@@ -484,11 +507,11 @@ impl Books {
             KeyCode::Char('n') => {
                 let mut book = Book::new("");
                 book.status = self.tab_status().unwrap_or(Status::ForLater);
-                self.mode = Mode::Form(Box::new(Form::new(book, true)));
+                self.mode = Mode::Form(Box::new(self.form(book, true)));
             }
             KeyCode::Char('e') | KeyCode::Enter => {
-                if let Some(book) = self.selected() {
-                    self.mode = Mode::Form(Box::new(Form::new(book.clone(), false)));
+                if let Some(book) = self.selected().cloned() {
+                    self.mode = Mode::Form(Box::new(self.form(book, false)));
                 }
             }
             KeyCode::Char('S') => {

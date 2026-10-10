@@ -9,7 +9,7 @@ license.workspace = true
 default = ["store"]
 # SQLite storage, Open Library and cover downloads (habitd). Without it the
 # crate is just the data model and the stats, for clients like hf.
-store = ["dep:rusqlite"]
+store = ["dep:rusqlite", "dep:base64", "dep:image"]
 
 [dependencies]
 anyhow.workspace = true
@@ -18,3 +18,5 @@ serde.workspace = true
 serde_json.workspace = true
 uuid = { version = "1", features = ["v5", "v7"] }
 rusqlite = { version = "0.40.2", features = ["bundled"], optional = true }
+base64 = { version = "0.22", optional = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }

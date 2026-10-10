@@ -4,6 +4,7 @@
 
 pub mod api;
 pub mod covers;
+pub mod googlebooks;
 pub mod model;
 pub mod stats;
 

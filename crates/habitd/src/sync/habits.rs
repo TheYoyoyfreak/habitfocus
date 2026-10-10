@@ -36,7 +36,12 @@ pub fn summary(config: &Config) -> serde_json::Value {
         .collect();
     serde_json::json!({
         "habits": habits,
-        "books": { "enabled": config.books.enabled, "habits": config.books.habits },
+        "books": {
+            "enabled": config.books.enabled,
+            "habits": config.books.habits,
+            "rating": config.books.rating,
+            "google_books_key": config.books.google_books_key,
+        },
         "day_start_ms": config.general.day_start,
     })
 }

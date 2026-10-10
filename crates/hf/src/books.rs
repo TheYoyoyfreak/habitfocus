@@ -31,7 +31,7 @@ pub enum BooksCommand {
         #[arg(short, long, default_value = "for_later", value_parser = parse_status)]
         status: Status,
     },
-    /// Search Open Library; add a result with --add
+    /// Search Open Library and Google Books; add a result with --add
     Search {
         query: String,
         /// Add the result with this number to the library
@@ -202,7 +202,8 @@ pub fn run(command: BooksCommand) -> anyhow::Result<()> {
             for (i, h) in hits.iter().enumerate() {
                 let year = h.pub_year.map(|y| format!(" ({y})")).unwrap_or_default();
                 let manga = if h.format == habit_books::Format::Manga { " [manga]" } else { "" };
-                println!("{:>2}. {} — {}{year}{manga}", i + 1, h.title, h.author.as_deref().unwrap_or(""));
+                let google = if is_google(h) { " [Google Books]" } else { "" };
+                println!("{:>2}. {} — {}{year}{manga}{google}", i + 1, h.title, h.author.as_deref().unwrap_or(""));
             }
         }
         BooksCommand::Status { book, status } => {
@@ -346,6 +347,11 @@ pub fn run(command: BooksCommand) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Whether a search hit came from Google Books rather than Open Library.
+fn is_google(book: &habit_books::Book) -> bool {
+    book.olid.as_deref().is_some_and(|id| id.starts_with(habit_books::googlebooks::ID_PREFIX))
 }
 
 #[cfg(test)]

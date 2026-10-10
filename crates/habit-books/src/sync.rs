@@ -40,7 +40,7 @@ impl SyncTable {
         match self {
             SyncTable::Books => &[
                 "id", "title", "subtitle", "author", "isbn", "olid", "pages", "pub_year", "format", "status", "rating",
-                "tags", "notes", "cover_url", "created_at", "updated_at", "deleted_at", "device_id",
+                "tags", "notes", "cover_url", "created_at", "updated_at", "deleted_at", "device_id", "score",
             ],
             SyncTable::Readings => &[
                 "id", "book_id", "started_at", "finished_at", "outcome", "created_at", "updated_at", "deleted_at",
@@ -233,7 +233,7 @@ mod tests {
         ship(&a, &b);
 
         let mut on_b = b.get_book(&dune.id).unwrap().unwrap();
-        on_b.rating = 5;
+        on_b.score = 9;
         b.save_book(&mut on_b).unwrap();
         let mut on_a = a.get_book(&dune.id).unwrap().unwrap();
         on_a.updated_at = on_b.updated_at; // save_book bumps it past b's edit
@@ -244,7 +244,7 @@ mod tests {
         ship(&b, &a);
         let (x, y) = (a.get_book(&dune.id).unwrap().unwrap(), b.get_book(&dune.id).unwrap().unwrap());
         assert_eq!(x, y);
-        assert_eq!((x.notes.as_deref(), x.rating), (Some("later"), 0), "a's edit is the later one");
+        assert_eq!((x.notes.as_deref(), x.score), (Some("later"), 0), "a's edit is the later one");
     }
 
     #[test]
@@ -296,6 +296,26 @@ mod tests {
         ship(&b, &a);
         assert!(a.list_pending().unwrap().is_empty());
         assert_eq!(a.list_sessions(Some("id-Emma")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn scores_travel_and_rows_of_older_devices_fall_back_to_their_rating() {
+        let (a, b) = devices();
+        let mut dune = Book::new("Dune");
+        dune.score = 7;
+        a.save_book(&mut dune).unwrap();
+        let row = a.local_changes(SyncTable::Books, 0, 10).unwrap().remove(0).1;
+        assert_eq!((row["score"].as_i64(), row["rating"].as_i64()), (Some(7), Some(4)), "older devices see 4 of 5");
+        ship(&a, &b);
+        assert_eq!(b.get_book(&dune.id).unwrap().unwrap().score, 7);
+
+        // An older habitfocus sends no score: its rating out of 5 counts double.
+        let mut old = row.clone();
+        old.as_object_mut().unwrap().remove("score");
+        old["rating"] = 3.into();
+        old["updated_at"] = (dune.updated_at + 10).into();
+        assert_eq!(b.merge_remote(SyncTable::Books, &[old]).unwrap(), 1);
+        assert_eq!(b.get_book(&dune.id).unwrap().unwrap().score, 6);
     }
 
     #[test]

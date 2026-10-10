@@ -64,6 +64,9 @@ pub struct BooksView {
     /// Set while no habit feeds the library: what to change (`Config::books_hint`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// How ratings are shown (`[books] rating`).
+    #[serde(default)]
+    pub rating: crate::config::RatingScale,
 }
 
 /// The sync account and how syncing goes, from habitd's sync thread.
