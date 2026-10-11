@@ -246,7 +246,11 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         }
         keys.push(("a", "abort"));
     }
-    keys.extend([(if app.panes().len() > 5 { "1-6" } else { "1-5" }, "panes"), ("o", "settings"), ("q", "quit")]);
+    keys.push((if app.panes().len() > 5 { "1-6" } else { "1-5" }, "panes"));
+    if app.snapshot.as_ref().is_some_and(|s| s.sync.is_some()) {
+        keys.push(("Y", "sync"));
+    }
+    keys.extend([("o", "settings"), ("q", "quit")]);
     keys
 }
 

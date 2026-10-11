@@ -661,7 +661,7 @@ pub(crate) mod tests {
     #[test]
     fn habitfocus_keys_pass_through() {
         let mut books = books_with(&[("Dune", Status::Reading)]);
-        for c in ['q', 's', 'a', 'o', 'R', 'L', 'h', 'l', '2'] {
+        for c in ['q', 's', 'a', 'o', 'R', 'Y', 'L', 'h', 'l', '2'] {
             assert!(!books.handle_key(key(KeyCode::Char(c))).unwrap(), "{c} is habitfocus'");
         }
         assert!(!books.handle_key(key(KeyCode::Esc)).unwrap(), "esc without a filter quits");

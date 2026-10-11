@@ -237,7 +237,7 @@ fn sync_lines(app: &App) -> Vec<Line<'static>> {
     if sync.signed_out {
         lines.push(command("sign in again", "hf sync login <server> <user>"));
     } else {
-        lines.push(command("now / details", "hf sync now · hf sync status"));
+        lines.push(command("now / details", "Y here · hf sync now · hf sync status"));
     }
     lines.push(command("stop", "hf sync logout"));
     lines

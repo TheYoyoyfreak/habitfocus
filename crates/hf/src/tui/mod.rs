@@ -37,6 +37,7 @@ const FOCUS_HEARTBEAT: Duration = Duration::from_secs(2);
 enum Message {
     Snapshot(Box<Snapshot>),
     Disconnected,
+    Synced(Box<Result<habit_ipc::Response, String>>),
 }
 
 fn stream_snapshots(tx: Sender<Message>) {
@@ -168,7 +169,8 @@ impl FocusReporter {
 
 pub fn run() -> anyhow::Result<()> {
     let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || stream_snapshots(tx));
+    let streamer = tx.clone();
+    std::thread::spawn(move || stream_snapshots(streamer));
     let mut terminal = ratatui::init();
     let _ = execute!(std::io::stdout(), EnableFocusChange);
 
@@ -182,7 +184,7 @@ pub fn run() -> anyhow::Result<()> {
         state: FocusState::new(),
     };
 
-    let result = event_loop(&mut terminal, &rx, &mut app, &mut focus);
+    let result = event_loop(&mut terminal, (&tx, &rx), &mut app, &mut focus);
     focus.disconnect();
     let _ = execute!(std::io::stdout(), DisableFocusChange);
     ratatui::restore();
@@ -191,7 +193,7 @@ pub fn run() -> anyhow::Result<()> {
 
 fn event_loop(
     terminal: &mut DefaultTerminal,
-    rx: &Receiver<Message>,
+    (tx, rx): (&Sender<Message>, &Receiver<Message>),
     app: &mut App,
     focus: &mut FocusReporter,
 ) -> anyhow::Result<()> {
@@ -212,6 +214,11 @@ fn event_loop(
                     }
                 }
                 Message::Disconnected => app.connected = false,
+                Message::Synced(result) => {
+                    app.synced(*result);
+                    refresh(app);
+                    refreshed = Instant::now();
+                }
             }
         }
         if app.connected && refreshed.elapsed() >= REFRESH {
@@ -249,6 +256,12 @@ fn event_loop(
             Action::Refresh => {
                 refresh(app);
                 refreshed = Instant::now();
+            }
+            Action::SyncNow => {
+                let tx = tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(Message::Synced(Box::new(habit_ipc::request(&Request::SyncNow))));
+                });
             }
             Action::OpenEditor { section, id } => match habit_ipc::request(&Request::ConfigEntries) {
                 Ok(response) => match (response.ok, &response.config) {

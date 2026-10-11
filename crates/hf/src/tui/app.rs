@@ -69,6 +69,8 @@ pub enum Action {
     /// Fetch the config entries and open the form for `id` (a new entry
     /// without one).
     OpenEditor { section: Section, id: Option<String> },
+    /// Sync with the server in the background (it can take a while).
+    SyncNow,
 }
 
 pub struct Setting {
@@ -194,6 +196,8 @@ pub struct App {
     pub books: Option<std::cell::RefCell<super::books::Books>>,
     /// `books.seq` of the last snapshot; `None` makes the next one reload.
     books_seq: Option<u64>,
+    /// A sync started with Y hasn't answered yet.
+    pub syncing: bool,
 }
 
 impl App {
@@ -226,6 +230,7 @@ impl App {
             dismissed_goal: None,
             events_seq: None,
             flash: None,
+            syncing: false,
             books: None,
             books_seq: None,
         }
@@ -736,6 +741,7 @@ impl App {
             KeyCode::Char('A') if has_session => self.popup = Some(Popup::ConfirmAbort { emergency: true }),
             KeyCode::Char('o') => self.popup = Some(Popup::Settings { index: 0, editing: None }),
             KeyCode::Char('R') => return Action::Send(Request::Reload),
+            KeyCode::Char('Y') => return self.sync_now(),
             _ => {
                 return match self.pane {
                     Pane::Today | Pane::Habits => self.handle_habit_key(key),
@@ -747,6 +753,25 @@ impl App {
             }
         }
         Action::None
+    }
+
+    fn sync_now(&mut self) -> Action {
+        if self.snapshot.as_ref().is_none_or(|s| s.sync.is_none()) {
+            self.set_flash("Sync is off: settings (o) show how to set it up", true);
+            return Action::None;
+        }
+        if self.syncing {
+            return Action::None;
+        }
+        self.syncing = true;
+        self.set_flash("Syncing…", false);
+        Action::SyncNow
+    }
+
+    /// The answer to a sync started with Y.
+    pub fn synced(&mut self, result: Result<Response, String>) {
+        self.syncing = false;
+        self.apply_response(result);
     }
 
     fn handle_habit_key(&mut self, key: KeyEvent) -> Action {
@@ -1392,5 +1417,23 @@ pub(crate) mod tests {
         assert_eq!(app.handle_key(key(KeyCode::Char('q'))), Action::None);
         app.handle_key(key(KeyCode::Char('1')));
         assert_eq!((app.pane, app.insights_filter.as_str()), (Pane::Insights, "q1"));
+    }
+
+    #[test]
+    fn shift_y_syncs_once_at_a_time_and_only_when_signed_in() {
+        let mut app = app();
+        assert_eq!(app.handle_key(key(KeyCode::Char('Y'))), Action::None);
+        assert!(app.flash().is_some_and(|f| f.error && f.text.contains("Sync is off")));
+
+        let mut snapshot = engine().snapshot(0);
+        snapshot.sync = Some(habit_core::snapshot::SyncView::default());
+        app.set_snapshot(snapshot);
+        assert_eq!(app.handle_key(key(KeyCode::Char('Y'))), Action::SyncNow);
+        assert_eq!(app.handle_key(key(KeyCode::Char('Y'))), Action::None, "one sync at a time");
+
+        app.synced(Err("sync failed: server down".into()));
+        assert!(!app.syncing);
+        assert!(app.flash().is_some_and(|f| f.error));
+        assert_eq!(app.handle_key(key(KeyCode::Char('Y'))), Action::SyncNow);
     }
 }

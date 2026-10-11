@@ -132,7 +132,8 @@ a sidebar with today's numbers, below that in a tab bar. The footer shows the ke
 | 6 Books      | your books by status with cover, progress and pace; reading insights (only with `[books]`) | see [Books](#books) |
 
 Everywhere: `s` stops and keeps progress, `c` continues after a round, `a` discards a soft session, `A`
-emergency-aborts, `o` opens settings, `R` reloads the config, `L` jumps to the lock, `q` quits.
+emergency-aborts, `o` opens settings, `R` reloads the config, `Y` syncs right away (when sync is set up), `L` jumps
+to the lock, `q` quits.
 
 ### Editing blocks and habits in the TUI
 
