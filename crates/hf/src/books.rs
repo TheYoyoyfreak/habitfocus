@@ -272,7 +272,7 @@ pub fn run(command: BooksCommand) -> anyhow::Result<()> {
         }
         BooksCommand::Stats => {
             let library = call(BooksOp::Library)?;
-            let ins = stats::insights(&library.sessions, &library.readings, now_ms(), &Local);
+            let ins = stats::insights(&library.sessions, &library.books, &library.readings, now_ms(), &Local);
             println!("today      {}", format_duration(ins.today_ms));
             println!("this week  {}", format_duration(ins.week_ms));
             println!("this month {}", format_duration(ins.month_ms));

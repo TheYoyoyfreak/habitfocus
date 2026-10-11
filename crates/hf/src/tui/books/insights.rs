@@ -14,7 +14,7 @@ use super::Books;
 const WEEKDAYS: [&str; 7] = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
 
 pub fn draw(f: &mut Frame, app: &Books, area: Rect) {
-    let ins = stats::insights(&app.sessions, &app.readings, chrono::Utc::now().timestamp_millis(), &Local);
+    let ins = stats::insights(&app.sessions, &app.all_books, &app.readings, chrono::Utc::now().timestamp_millis(), &Local);
     if ins.sessions == 0 {
         let text = "No reading sessions yet.\n\nSessions of your reading habits land here (pin the book with m),\nor press g on a book to log one you already read.";
         f.render_widget(Paragraph::new(text).dim().block(Block::bordered().title(" Insights ")), area);

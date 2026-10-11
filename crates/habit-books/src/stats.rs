@@ -5,7 +5,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use chrono::{DateTime, Datelike, Days, NaiveDate, TimeZone, Timelike};
 
-use crate::model::{Reading, Session, Source, Status};
+use crate::model::{Book, Reading, Session, Source, Status};
 
 const HOUR_MS: f64 = 3_600_000.0;
 
@@ -78,7 +78,35 @@ pub struct Insights {
     pub finished_this_year: usize,
 }
 
-pub fn insights<Tz: TimeZone>(sessions: &[Session], readings: &[Reading], now_ms: i64, tz: &Tz) -> Insights {
+/// The latest finished pass of each book whose status is "finished": a book
+/// counts once, when it was last finished. One moved back to reading (even by
+/// mistake) keeps its closed passes, but they don't count. The mobile app
+/// counts the same way (`finishedReadings`).
+pub fn finished_readings<'a>(books: &[Book], readings: &'a [Reading]) -> Vec<&'a Reading> {
+    let finished: std::collections::HashSet<&str> =
+        books.iter().filter(|b| b.status == Status::Finished).map(|b| b.id.as_str()).collect();
+    let mut latest: HashMap<&str, &Reading> = HashMap::new();
+    for r in readings {
+        let (Some(at), Some(Status::Finished)) = (r.finished_at, r.outcome) else { continue };
+        if !finished.contains(r.book_id.as_str()) {
+            continue;
+        }
+        let seen = latest.entry(r.book_id.as_str()).or_insert(r);
+        if seen.finished_at.is_some_and(|s| at > s) {
+            *seen = r;
+        }
+    }
+    latest.into_values().collect()
+}
+
+/// `books` and `readings` give the books finished this year ([`finished_readings`]).
+pub fn insights<Tz: TimeZone>(
+    sessions: &[Session],
+    books: &[Book],
+    readings: &[Reading],
+    now_ms: i64,
+    tz: &Tz,
+) -> Insights {
     let local = |ms: i64| tz.timestamp_millis_opt(ms).single();
     let Some(now) = local(now_ms) else { return Insights::default() };
     let today = now.date_naive();
@@ -125,9 +153,8 @@ pub fn insights<Tz: TimeZone>(sessions: &[Session], readings: &[Reading], now_ms
     ins.by_device = sorted(by_device);
     ins.by_book = sorted(by_book);
     (ins.current_streak, ins.longest_streak) = streaks(&days, today);
-    ins.finished_this_year = readings
-        .iter()
-        .filter(|r| r.outcome == Some(Status::Finished))
+    ins.finished_this_year = finished_readings(books, readings)
+        .into_iter()
         .filter_map(|r| r.finished_at.and_then(local))
         .filter(|d| d.year() == today.year())
         .count();
@@ -239,7 +266,14 @@ mod tests {
             Reading { id: "r2".into(), book_id: "b".into(), started_at: 0, finished_at: Some(at("2026-04-01 12:00")), outcome: Some(Status::Abandoned) },
             Reading { id: "r3".into(), book_id: "c".into(), started_at: 0, finished_at: Some(at("2025-04-01 12:00")), outcome: Some(Status::Finished) },
         ];
-        let ins = insights(&sessions, &readings, now, &tz());
+        let book = |id: &str, status: Status| {
+            let mut b = Book::new(id);
+            b.id = id.into();
+            b.status = status;
+            b
+        };
+        let books = [book("a", Status::Finished), book("b", Status::Abandoned), book("c", Status::Finished)];
+        let ins = insights(&sessions, &books, &readings, now, &tz());
         assert_eq!(ins.today_ms, 20 * MIN);
         assert_eq!(ins.week_ms, 90 * MIN);
         assert_eq!(ins.month_ms, 100 * MIN);
@@ -256,6 +290,26 @@ mod tests {
         assert_eq!(ins.by_book[0], ("b".into(), 160 * MIN));
         assert_eq!((ins.current_streak, ins.longest_streak), (4, 4));
         assert_eq!(ins.finished_this_year, 1);
+    }
+
+    #[test]
+    fn only_books_finished_now_count_once() {
+        let pass = |id: &str, book: &str, finished: i64| Reading {
+            id: id.into(),
+            book_id: book.into(),
+            started_at: 0,
+            finished_at: Some(finished),
+            outcome: Some(Status::Finished),
+        };
+        let mut dune = Book::new("Dune");
+        dune.id = "a".into();
+        dune.status = Status::Finished;
+        let mut emma = Book::new("Emma");
+        emma.id = "b".into();
+        emma.status = Status::Reading; // finished by mistake, set back
+        let readings = [pass("r1", "a", 10), pass("r2", "a", 30), pass("r3", "b", 20)];
+        let counted = finished_readings(&[dune, emma], &readings);
+        assert_eq!(counted.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["r2"], "once, at the last finish");
     }
 
     #[test]
