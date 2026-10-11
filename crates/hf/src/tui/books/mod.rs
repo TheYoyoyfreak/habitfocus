@@ -8,11 +8,14 @@ mod inbox;
 mod insights;
 mod reading;
 pub mod ui;
+mod volumes;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use habit_books::api::{BooksOp, BooksReply};
+use habit_books::mangapassion::{self, Series};
+use habit_books::series::{self, Row};
 use habit_books::{Book, Pending, Pin, Reading, Session, Status};
 use habit_ipc::Request;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
@@ -24,6 +27,7 @@ use cover::{Cover, CoverMode};
 use form::{Form, FormOutcome};
 use inbox::Assign;
 use reading::LogForm;
+use volumes::{Outcome as VolumesOutcome, Volumes};
 
 /// Where the library is kept.
 pub trait Backend {
@@ -59,6 +63,8 @@ pub enum Mode {
     StatusPicker(usize),
     ConfirmDelete,
     Online(Box<Online>),
+    /// Volumes of a manga edition to pick from.
+    Volumes(Box<Volumes>),
     /// Page reached in the selected book's latest session, as typed.
     SetPage(String),
     Log(Box<LogForm>),
@@ -69,7 +75,7 @@ pub enum Mode {
     Help,
 }
 
-/// Online search popup (Open Library and Google Books).
+/// Online search popup (Open Library, Google Books, Manga-Passion).
 pub struct Online {
     pub query: String,
     pub state: OnlineState,
@@ -80,15 +86,17 @@ pub struct Online {
 pub enum OnlineState {
     Typing,
     Loading,
-    /// `owned`: Open Library and Google Books ids already in the library.
-    Results { hits: Vec<Book>, selected: usize, owned: HashSet<String> },
+    /// Manga editions (`series`) come first, then the books; `selected`
+    /// counts through both. `owned`: ids of hits already in the library.
+    Results { series: Vec<Series>, hits: Vec<Book>, selected: usize, owned: HashSet<String> },
     Error(String),
 }
 
 /// Results of background work (network, image decoding).
 pub enum Done {
     Cover { url: String, result: Result<image::DynamicImage, String> },
-    Search { seq: u64, result: Result<Vec<Book>, String> },
+    Search { seq: u64, result: Result<(Vec<Series>, Vec<Book>), String> },
+    Volumes { seq: u64, result: Result<Vec<Book>, String> },
 }
 
 /// A reading-habit session in progress, from the snapshot.
@@ -126,6 +134,10 @@ pub struct Books {
     pub query: String,
     /// Books on the current tab.
     pub books: Vec<Book>,
+    /// What the table lists: `books`, with series folded.
+    pub rows: Vec<Row>,
+    /// Series (by `series::key`) whose volumes are listed under them.
+    pub expanded: HashSet<String>,
     /// Matches per tab for the current query, same order as `TABS`.
     pub counts: [usize; 5],
     pub table: TableState,
@@ -175,6 +187,8 @@ impl Books {
             insights: false,
             query: String::new(),
             books: Vec::new(),
+            rows: Vec::new(),
+            expanded: HashSet::new(),
             counts: [0; 5],
             table: TableState::default(),
             mode: Mode::Normal,
@@ -208,8 +222,22 @@ impl Books {
         self.message = Some((text.into(), false));
     }
 
+    /// The selected book; `None` on a folded series' row.
     pub fn selected(&self) -> Option<&Book> {
-        self.table.selected().and_then(|i| self.books.get(i))
+        match self.selected_row()? {
+            Row::Book { index, .. } => self.books.get(*index),
+            Row::Series(_) => None,
+        }
+    }
+
+    pub fn selected_row(&self) -> Option<&Row> {
+        self.table.selected().and_then(|i| self.rows.get(i))
+    }
+
+    /// A series row's volume to show: the first not finished, else the last.
+    pub fn series_current(&self, summary: &series::Summary) -> Option<&Book> {
+        let volumes: Vec<&Book> = summary.books.iter().filter_map(|i| self.books.get(*i)).collect();
+        volumes.iter().find(|b| b.status != Status::Finished).or(volumes.last()).copied()
     }
 
     /// Status filter of the current tab (`None` for "All").
@@ -229,14 +257,23 @@ impl Books {
         }
         if let Mode::Online(online) = &self.mode {
             return match &online.state {
-                OnlineState::Results { hits, selected, .. } => hits.get(*selected).and_then(|b| b.cover_url.clone()),
+                OnlineState::Results { series, hits, selected, .. } => match series.get(*selected) {
+                    Some(s) => s.cover.clone(),
+                    None => hits.get(*selected - series.len()).and_then(|b| b.cover_url.clone()),
+                },
                 _ => None,
             };
+        }
+        if let Mode::Volumes(v) = &self.mode {
+            return v.current().and_then(|b| b.cover_url.clone());
         }
         if self.insights {
             return None;
         }
-        self.selected().and_then(|b| b.cover_url.clone())
+        match self.selected_row()? {
+            Row::Series(s) => self.series_current(s).and_then(|b| b.cover_url.clone()),
+            Row::Book { .. } => self.selected().and_then(|b| b.cover_url.clone()),
+        }
     }
 
     /// Starts loading the wanted cover if it isn't known yet.
@@ -279,10 +316,22 @@ impl Books {
                     return;
                 }
                 online.state = match result {
-                    Ok(hits) if hits.is_empty() => OnlineState::Error("Nothing found.".into()),
-                    Ok(hits) => OnlineState::Results { hits, selected: 0, owned },
+                    Ok((series, hits)) if series.is_empty() && hits.is_empty() => {
+                        OnlineState::Error("Nothing found.".into())
+                    }
+                    Ok((series, hits)) => OnlineState::Results { series, hits, selected: 0, owned },
                     Err(e) => OnlineState::Error(e),
                 };
+            }
+            Done::Volumes { seq, result } => {
+                let Mode::Volumes(v) = &mut self.mode else { return };
+                if v.seq != seq {
+                    return;
+                }
+                if let Some(mut book) = v.loaded(result) {
+                    book.status = Status::Reading;
+                    self.mode = Mode::Form(Box::new(self.form(book, true)));
+                }
             }
         }
     }
@@ -296,7 +345,7 @@ impl Books {
         }
         let (tx, query, seq) = (self.tx.clone(), online.query.trim().to_owned(), self.seq);
         std::thread::spawn(move || {
-            let result = Ipc.call(BooksOp::Search { query }).map(|reply| reply.hits);
+            let result = Ipc.call(BooksOp::Search { query }).map(|reply| (reply.series, reply.hits));
             let _ = tx.send(Done::Search { seq, result });
         });
     }
@@ -321,13 +370,18 @@ impl Books {
                     return;
                 }
             }
-            OnlineState::Results { hits, selected, .. } => match key.code {
+            OnlineState::Results { series, hits, selected, .. } => match key.code {
                 KeyCode::Esc => return,
-                KeyCode::Char('j') | KeyCode::Down => *selected = (*selected + 1).min(hits.len() - 1),
+                KeyCode::Char('j') | KeyCode::Down => *selected = (*selected + 1).min(series.len() + hits.len() - 1),
                 KeyCode::Char('k') | KeyCode::Up => *selected = selected.saturating_sub(1),
                 KeyCode::Char('/') | KeyCode::Char('i') => online.state = OnlineState::Typing,
+                KeyCode::Enter if *selected < series.len() => {
+                    let chosen = series[*selected].clone();
+                    self.open_volumes(chosen, None);
+                    return;
+                }
                 KeyCode::Enter => {
-                    let mut book = hits[*selected].clone();
+                    let mut book = hits[*selected - series.len()].clone();
                     book.status = self.tab_status().unwrap_or(Status::ForLater);
                     self.mode = Mode::Form(Box::new(self.form(book, true)));
                     return;
@@ -336,6 +390,97 @@ impl Books {
             },
         }
         self.mode = Mode::Online(online);
+    }
+
+    /// Volume numbers of the series `name` in the library.
+    fn owned_volumes(&self, name: &str) -> HashSet<u32> {
+        let k = series::key(name);
+        self.all_books
+            .iter()
+            .filter_map(series::series_of)
+            .filter(|(n, _)| series::key(n) == k)
+            .filter_map(|(_, v)| v)
+            .collect()
+    }
+
+    /// Shows the volumes of `edition` to pick from; with `want`, opens the
+    /// form for that volume straight away.
+    fn open_volumes(&mut self, edition: Series, want: Option<u32>) {
+        let name = edition.title.trim_end_matches("(eBook)").trim().to_string();
+        let mut v = Volumes::new(edition, self.owned_volumes(&name), want);
+        self.seq += 1;
+        v.seq = self.seq;
+        if self.network {
+            let (tx, seq, id) = (self.tx.clone(), self.seq, v.series.id);
+            std::thread::spawn(move || {
+                let result = Ipc.call(BooksOp::Volumes { edition: id }).map(|reply| reply.hits);
+                let _ = tx.send(Done::Volumes { seq, result });
+            });
+        }
+        self.mode = Mode::Volumes(Box::new(v));
+    }
+
+    /// `N`: the volume after the last one of the selected series in the library.
+    fn next_volume(&mut self) {
+        let name = match self.selected_row() {
+            Some(Row::Series(s)) => Some(s.name.clone()),
+            Some(Row::Book { .. }) => self.selected().and_then(series::series_of).map(|(name, _)| name),
+            None => None,
+        };
+        let Some(name) = name else {
+            self.set_message("Not part of a series: e sets one, O finds manga volumes");
+            return;
+        };
+        let k = series::key(&name);
+        let edition = self
+            .all_books
+            .iter()
+            .filter(|b| series::series_of(b).is_some_and(|(n, _)| series::key(&n) == k))
+            .find_map(|b| b.olid.as_deref().and_then(mangapassion::edition_of));
+        let next = series::last_volume(&self.all_books, &name).unwrap_or(0) + 1;
+        match edition {
+            Some(id) => self.open_volumes(Series { id, title: name, ..Default::default() }, Some(next)),
+            // Not from Manga-Passion: look the series up, the edition is picked there.
+            None => {
+                let mut online = Box::new(Online { query: name, state: OnlineState::Typing, seq: 0 });
+                self.start_search(&mut online);
+                self.mode = Mode::Online(online);
+            }
+        }
+    }
+
+    fn volumes_key(&mut self, mut v: Box<Volumes>, key: KeyEvent) -> anyhow::Result<()> {
+        match v.handle_key(key) {
+            VolumesOutcome::Continue => self.mode = Mode::Volumes(v),
+            VolumesOutcome::Close => {}
+            VolumesOutcome::Edit(mut book) => {
+                book.status = self.tab_status().unwrap_or(Status::ForLater);
+                self.mode = Mode::Form(Box::new(self.form(*book, true)));
+            }
+            VolumesOutcome::Add { books, status, finished } => {
+                let n = books.len();
+                let mut first = None;
+                for mut book in books {
+                    book.status = status;
+                    let saved = self.call(BooksOp::Save { book: Box::new(book) })?.book;
+                    let Some(saved) = saved else { continue };
+                    if let (Some(day), Status::Finished | Status::Abandoned) = (finished, status) {
+                        self.call(BooksOp::SetDates { book: saved.id.clone(), started_at: day, finished_at: Some(day) })?;
+                    }
+                    first.get_or_insert(saved);
+                }
+                let Some(first) = first else { return Ok(()) };
+                let name = first.series.clone().unwrap_or_default();
+                self.set_message(format!("Added {n} volume{} of {name}", if n == 1 { "" } else { "s" }));
+                self.expanded.insert(series::key(&name));
+                if self.tab_status().is_some_and(|s| s != status) {
+                    self.tab = TABS.iter().position(|t| *t == Some(status)).unwrap_or(0);
+                }
+                self.insights = false;
+                self.reload(Some(first.id))?;
+            }
+        }
+        Ok(())
     }
 
     /// The add/edit form for `book`, with its reading dates and the rating scale.
@@ -364,7 +509,10 @@ impl Books {
 
     /// Re-reads the library, keeping `keep` (or the current book) selected when still visible.
     pub fn reload(&mut self, keep: Option<String>) -> anyhow::Result<()> {
-        let keep = keep.or_else(|| self.selected().map(|b| b.id.clone()));
+        let keep = keep.or_else(|| match self.selected_row()? {
+            Row::Series(s) => s.books.first().and_then(|i| self.books.get(*i)).map(|b| b.id.clone()),
+            Row::Book { .. } => self.selected().map(|b| b.id.clone()),
+        });
         let library = self.call(BooksOp::Library)?;
         self.sessions = library.sessions;
         self.readings = library.readings;
@@ -380,9 +528,15 @@ impl Books {
         }
         let tab = self.tab_status();
         self.books = all.into_iter().filter(|b| tab.is_none_or(|s| b.status == s)).collect();
-        let pos = keep.and_then(|id| self.books.iter().position(|b| b.id == id));
-        let fallback = self.table.selected().unwrap_or(0).min(self.books.len().saturating_sub(1));
-        self.table.select(if self.books.is_empty() { None } else { Some(pos.unwrap_or(fallback)) });
+        self.rows = series::rows(&self.books, &self.all_books, &self.expanded);
+        let pos = keep.and_then(|id| self.books.iter().position(|b| b.id == id)).and_then(|book| {
+            self.rows.iter().position(|row| match row {
+                Row::Book { index, .. } => *index == book,
+                Row::Series(s) => !s.expanded && s.books.contains(&book),
+            })
+        });
+        let fallback = self.table.selected().unwrap_or(0).min(self.rows.len().saturating_sub(1));
+        self.table.select(if self.rows.is_empty() { None } else { Some(pos.unwrap_or(fallback)) });
         Ok(())
     }
 
@@ -418,6 +572,9 @@ impl Books {
                         self.call(BooksOp::SetDates { book: book.id.clone(), started_at, finished_at })?;
                     }
                     self.set_message(format!("Saved “{}”", book.title));
+                    if let Some((name, _)) = series::series_of(&book) {
+                        self.expanded.insert(series::key(&name));
+                    }
                     // Follow the book to its tab so it stays in view.
                     if self.tab_status().is_some_and(|s| s != book.status) {
                         self.tab = TABS.iter().position(|t| *t == Some(book.status)).unwrap_or(0);
@@ -442,6 +599,7 @@ impl Books {
                 _ => {}
             },
             Mode::Online(online) => self.online_key(online, key),
+            Mode::Volumes(v) => self.volumes_key(v, key)?,
             Mode::SetPage(page) => self.set_page_key(page, key)?,
             Mode::Log(form) => self.log_key(form, key)?,
             Mode::Assign(a) => self.assign_key(a, key)?,
@@ -465,7 +623,7 @@ impl Books {
         if self.insights && !matches!(key.code, KeyCode::Char('f' | 'F' | 'i' | '?' | 'I')) {
             return Ok(false);
         }
-        let len = self.books.len();
+        let len = self.rows.len();
         match key.code {
             KeyCode::Char('?') => self.mode = Mode::Help,
             KeyCode::Char('i') => self.insights = !self.insights,
@@ -509,6 +667,10 @@ impl Books {
                 book.status = self.tab_status().unwrap_or(Status::ForLater);
                 self.mode = Mode::Form(Box::new(self.form(book, true)));
             }
+            KeyCode::Enter | KeyCode::Char(' ') if matches!(self.selected_row(), Some(Row::Series(_))) => {
+                self.toggle_series()?
+            }
+            KeyCode::Char('N') => self.next_volume(),
             KeyCode::Char('e') | KeyCode::Enter => {
                 if let Some(book) = self.selected().cloned() {
                     self.mode = Mode::Form(Box::new(self.form(book, false)));
@@ -524,6 +686,22 @@ impl Books {
             _ => return Ok(false),
         }
         Ok(true)
+    }
+
+    /// Folds or unfolds the selected series, staying on its row.
+    fn toggle_series(&mut self) -> anyhow::Result<()> {
+        let Some(Row::Series(s)) = self.selected_row() else { return Ok(()) };
+        let (k, open) = (s.key.clone(), s.expanded);
+        if open {
+            self.expanded.remove(&k);
+        } else {
+            self.expanded.insert(k.clone());
+        }
+        self.reload(None)?;
+        if let Some(pos) = self.rows.iter().position(|r| matches!(r, Row::Series(s) if s.key == k)) {
+            self.table.select(Some(pos));
+        }
+        Ok(())
     }
 
     fn search_key(&mut self, key: KeyEvent) -> anyhow::Result<()> {
@@ -692,8 +870,8 @@ pub(crate) mod tests {
             b
         };
         // A stale answer is ignored, the current one shown.
-        books.finish(Done::Search { seq: seq + 7, result: Ok(vec![]) });
-        books.finish(Done::Search { seq, result: Ok(vec![hit("ONE PIECE 1", "OL1W"), hit("ONE PIECE 2", "OL2W")]) });
+        books.finish(Done::Search { seq: seq + 7, result: Ok((vec![], vec![])) });
+        books.finish(Done::Search { seq, result: Ok((vec![], vec![hit("ONE PIECE 1", "OL1W"), hit("ONE PIECE 2", "OL2W")])) });
         press(&mut books, "j\n");
         let Mode::Form(_) = &books.mode else { panic!("no form") };
         press(&mut books, "\n");
@@ -717,5 +895,92 @@ pub(crate) mod tests {
         assert_eq!(o.query, "xy");
         press(&mut books, "\x1b");
         assert!(matches!(books.mode, Mode::Normal));
+    }
+
+    fn manga(db: &habit_books::Db, title: &str, status: Status, olid: Option<&str>) {
+        let mut b = Book::new(title);
+        b.format = habit_books::Format::Manga;
+        b.status = status;
+        b.olid = olid.map(str::to_owned);
+        habit_books::series::fill_in(&mut b);
+        db.save_book(&mut b).unwrap();
+    }
+
+    fn series_lib() -> Books {
+        let db = habit_books::Db::open_in_memory().unwrap();
+        manga(&db, "Berserk 1", Status::Finished, Some("mp:5:1"));
+        manga(&db, "Berserk 2", Status::Finished, Some("mp:5:2"));
+        let mut dune = Book::new("Dune");
+        dune.status = Status::Finished;
+        db.save_book(&mut dune).unwrap();
+        let mut books = books_from(db);
+        books.tab = 1;
+        books.reload(None).unwrap();
+        books
+    }
+
+    #[test]
+    fn volumes_fold_into_their_series_and_unfold_with_enter() {
+        let mut books = series_lib();
+        assert_eq!(books.books.len(), 3);
+        assert_eq!(books.rows.len(), 2, "Berserk folded, Dune");
+        let first = books.rows.iter().position(|r| matches!(r, Row::Series(_))).unwrap();
+        books.table.select(Some(first));
+        assert!(books.selected().is_none(), "a series row is no book");
+        press(&mut books, "\n");
+        assert_eq!(books.rows.len(), 4);
+        assert!(matches!(books.selected_row(), Some(Row::Series(s)) if s.expanded));
+        press(&mut books, "j");
+        assert_eq!(books.selected().unwrap().title, "Berserk 1");
+        press(&mut books, "k ");
+        assert_eq!(books.rows.len(), 2, "space folds too");
+    }
+
+    #[test]
+    fn next_volume_loads_the_edition_and_opens_the_form() {
+        let mut books = series_lib();
+        let first = books.rows.iter().position(|r| matches!(r, Row::Series(_))).unwrap();
+        books.table.select(Some(first));
+        press(&mut books, "N");
+        let Mode::Volumes(v) = &books.mode else { panic!("no volumes") };
+        assert_eq!((v.series.id, v.want), (5, Some(3)));
+        let seq = v.seq;
+        let volume = |n: u32| {
+            let mut b = Book::new(format!("Berserk {n}"));
+            b.series = Some("Berserk".into());
+            b.volume = Some(n);
+            b.format = habit_books::Format::Manga;
+            b
+        };
+        books.finish(Done::Volumes { seq, result: Ok((1..=4).map(volume).collect()) });
+        let Mode::Form(_) = &books.mode else { panic!("no form") };
+        press(&mut books, "\n");
+        assert_eq!(books.tab, 0, "a next volume is being read");
+        assert_eq!(books.selected().unwrap().title, "Berserk 3");
+    }
+
+    #[test]
+    fn marked_volumes_are_added_at_once() {
+        let mut books = series_lib();
+        books.open_volumes(Series { id: 5, title: "Berserk".into(), ..Default::default() }, None);
+        let Mode::Volumes(v) = &books.mode else { panic!() };
+        let seq = v.seq;
+        let volume = |n: u32| {
+            let mut b = Book::new(format!("Berserk {n}"));
+            b.series = Some("Berserk".into());
+            b.volume = Some(n);
+            b
+        };
+        books.finish(Done::Volumes { seq, result: Ok((1..=5).map(volume).collect()) });
+        // Starts on volume 3; marks 3 and 4, finished on a given day.
+        press(&mut books, "ja\n2026-02-01\n");
+        assert!(matches!(books.mode, Mode::Normal));
+        assert_eq!(books.message.as_ref().unwrap().0, "Added 2 volumes of Berserk");
+        assert_eq!(books.counts[1], 5, "finished: four volumes of Berserk and Dune");
+        let day = form::parse_date("2026-02-01", "x").unwrap();
+        let four = books.all_books.iter().find(|b| b.title == "Berserk 4").unwrap().id.clone();
+        let reading = books.readings.iter().find(|r| r.book_id == four).unwrap();
+        assert_eq!((Some(reading.started_at), reading.finished_at), (day, day));
+        assert!(matches!(books.selected_row(), Some(Row::Book { nested: true, .. })), "unfolded to show them");
     }
 }

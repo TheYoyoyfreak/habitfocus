@@ -41,6 +41,7 @@ impl SyncTable {
             SyncTable::Books => &[
                 "id", "title", "subtitle", "author", "isbn", "olid", "pages", "pub_year", "format", "status", "rating",
                 "tags", "notes", "cover_url", "created_at", "updated_at", "deleted_at", "device_id", "score",
+                "series", "volume",
             ],
             SyncTable::Readings => &[
                 "id", "book_id", "started_at", "finished_at", "outcome", "created_at", "updated_at", "deleted_at",
@@ -316,6 +317,18 @@ mod tests {
         old["updated_at"] = (dune.updated_at + 10).into();
         assert_eq!(b.merge_remote(SyncTable::Books, &[old]).unwrap(), 1);
         assert_eq!(b.get_book(&dune.id).unwrap().unwrap().score, 6);
+    }
+
+    #[test]
+    fn series_and_volume_travel() {
+        let (a, b) = devices();
+        let mut csm = Book::new("Chainsaw Man 3");
+        csm.series = Some("Chainsaw Man".into());
+        csm.volume = Some(3);
+        a.save_book(&mut csm).unwrap();
+        ship(&a, &b);
+        let got = b.get_book(&csm.id).unwrap().unwrap();
+        assert_eq!((got.series.as_deref(), got.volume), (Some("Chainsaw Man"), Some(3)));
     }
 
     #[test]

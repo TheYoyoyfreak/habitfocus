@@ -86,6 +86,9 @@ pub struct Book {
     pub tags: Vec<String>,
     pub notes: Option<String>,
     pub cover_url: Option<String>,
+    /// The series the book is a volume of ("Chainsaw Man"), and which one.
+    pub series: Option<String>,
+    pub volume: Option<u32>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -107,6 +110,8 @@ impl Book {
             tags: Vec::new(),
             notes: None,
             cover_url: None,
+            series: None,
+            volume: None,
             created_at: 0,
             updated_at: 0,
         }

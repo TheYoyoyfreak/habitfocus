@@ -377,7 +377,7 @@ later), which gives progress, pages per hour and the time left.
 
 In the Books pane: `f`/`F` steps through the statuses (reading, finished, for later, abandoned, all), `i` shows
 reading insights, `/` filters, `n` adds a book, `O` adds one from Open Library, `e` edits, `S` changes the status,
-`d` deletes, `m` pins, `p` sets the page, `g` logs a session you read without a habit, `v` lists the book's
+`d` deletes, `m` pins, `N` adds the next volume of a series, `p` sets the page, `g` logs a session you read without a habit, `v` lists the book's
 sessions, `I` opens the inbox, `C` switches covers (picture / pixel art / off), `?` lists the keys. Covers show as
 pictures in kitty, foot (sixel), WezTerm and iTerm2, elsewhere as pixel art; they're cached in
 `~/.cache/habitfocus/covers`.
@@ -394,11 +394,22 @@ pictures in kitty, foot (sixel), WezTerm and iTerm2, elsewhere as pixel art; the
   editions. Without a key, Google's quota is shared by everyone and often used up; a free key (Google Cloud
   console, *Books API*, 1000 searches a day) goes in `google_books_key` and reaches the mobile app, end-to-end
   encrypted, with the habits it syncs.
+- **Manga** come from [Manga-Passion](https://www.manga-passion.de), which lists every German edition with all
+  its volumes (covers, pages, release year). The search shows matching editions first (▸ … *manga series*):
+  `enter` lists the volumes, `space` marks one, `a` marks everything up to the cursor that isn't in the library
+  yet; `enter` adds the marked ones at once (status and finish day for all), or opens the form for the one under
+  the cursor when nothing is marked.
+- **Series:** books have *Series* and *Volume*; a manga's are read off its title ("Chainsaw Man 21") when left
+  empty. Two or more volumes of a series on a tab fold into one row (volumes there, how many of the series are
+  finished); `enter` unfolds it. `N` on a series or one of its volumes adds the volume after the highest one in
+  the library: straight to the form when the series came from Manga-Passion, else through a search for it.
 
 ```sh
 hf books list [-s reading] [-q herbert] [--json]
 hf books add "Dune" -a "Frank Herbert" -p 612 -s reading
 hf books search "der name des windes"            # Open Library and Google Books; --add 1 -s reading adds a result
+hf books search "chainsaw man"                    # … and manga editions: [269] Chainsaw Man — Egmont Manga, …
+hf books volumes 269 [--add 1-5,7 -s finished]    # the edition's volumes; --add adds some
 hf books status dune finished
 hf books pin dune                                 # the next reading session is for Dune (--clear)
 hf books page 120                                 # page reached in the latest session [--book …]

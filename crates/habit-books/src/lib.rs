@@ -5,7 +5,9 @@
 pub mod api;
 pub mod covers;
 pub mod googlebooks;
+pub mod mangapassion;
 pub mod model;
+pub mod series;
 pub mod stats;
 
 #[cfg(feature = "store")]

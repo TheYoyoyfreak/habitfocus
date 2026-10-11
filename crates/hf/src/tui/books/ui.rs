@@ -16,6 +16,7 @@ use super::cover::{self, Cover, CoverMode, PixelArt};
 use super::form::{rating_label, Field, Form};
 use super::reading::{LogForm, LOG_LABELS};
 use super::{inbox, insights, tab_label, Books, Mode, Online, OnlineState, TABS};
+use habit_books::series::{self, Row as SeriesRow};
 
 pub const ACCENT: Color = Color::Cyan;
 
@@ -59,6 +60,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut Books) {
             }
         }
         Mode::Online(_) => draw_online(f, app),
+        Mode::Volumes(_) => super::volumes::draw(f, app),
         Mode::SetPage(page) => draw_set_page(f, app, page),
         Mode::Log(form) => draw_log(f, form),
         Mode::Assign(a) => inbox::draw(f, app, a),
@@ -104,18 +106,42 @@ fn draw_table(f: &mut Frame, app: &mut Books, area: Rect) {
         f.render_widget(Paragraph::new(hint).dim().block(block), area);
         return;
     }
-    let rows = app.books.iter().map(|b| {
+    let rows: Vec<Row<'static>> = app.rows.iter().map(|row| {
+        let (index, nested) = match row {
+            SeriesRow::Book { index, nested } => (*index, *nested),
+            SeriesRow::Series(s) => {
+                let fold = if s.expanded { "▾ " } else { "▸ " };
+                let author = app.series_current(s).and_then(|b| b.author.clone()).unwrap_or_default();
+                let range = series::range_label(s.first, s.last);
+                return Row::new([
+                    Cell::from(Line::from(vec![
+                        fold.fg(ACCENT),
+                        Span::from(s.name.clone()).bold(),
+                        format!("  {range}").dim(),
+                    ])),
+                    Cell::from(author).style(Style::new().fg(Color::Gray)),
+                    Cell::from(format!("{}/{} ✓", s.finished, s.owned)).style(Color::Green),
+                ]);
+            }
+        };
+        let b = &app.books[index];
         let mark = if app.pin.as_ref().is_some_and(|p| p.book_id == b.id) {
             Span::from("◉ ").fg(Color::Yellow)
         } else {
             Span::raw("")
         };
+        let indent = if nested { Span::from("  └ ").dim() } else { Span::raw("") };
+        let title = match (nested, b.volume) {
+            (true, Some(v)) => format!("Vol. {v}{}", b.subtitle.as_deref().map(|s| format!(" · {s}")).unwrap_or_default()),
+            _ => b.title.clone(),
+        };
+        let status = if nested { format!("  {}", b.status.label()) } else { String::new() };
         Row::new([
-            Cell::from(Line::from(vec![mark, Span::raw(b.title.as_str())])),
-            Cell::from(b.author.as_deref().unwrap_or("")).style(Style::new().fg(Color::Gray)),
+            Cell::from(Line::from(vec![indent, mark, Span::raw(title), Span::styled(status, status_color(b.status).dim())])),
+            Cell::from(if nested { String::new() } else { b.author.clone().unwrap_or_default() }).style(Style::new().fg(Color::Gray)),
             Cell::from(if b.score > 0 { rating_label(b.score, app.rating) } else { String::new() }).style(Color::Yellow),
         ])
-    });
+    }).collect();
     let table = Table::new(rows, [Constraint::Fill(3), Constraint::Fill(2), Constraint::Length(6)])
         .header(Row::new(["Title", "Author", "Rating"]).style(Style::new().add_modifier(Modifier::DIM)))
         .row_highlight_style(Style::new().bg(Color::DarkGray).bold())
@@ -128,6 +154,9 @@ fn draw_detail(f: &mut Frame, app: &mut Books, area: Rect) {
     let block = Block::bordered().title(" Details ");
     let mut inner = block.inner(area);
     f.render_widget(block, area);
+    if let Some(SeriesRow::Series(s)) = app.selected_row().cloned() {
+        return draw_series_detail(f, app, &s, inner);
+    }
     let Some(b) = app.selected().cloned() else { return };
     if let (Some(url), false) = (&b.cover_url, app.cover_mode == CoverMode::Off) {
         let rows = (inner.height / 2).min(16);
@@ -148,6 +177,10 @@ fn draw_detail(f: &mut Frame, app: &mut Books, area: Rect) {
     }
     if let Some(a) = &b.author {
         lines.push(Line::from(format!("by {a}")));
+    }
+    if let Some((name, volume)) = series::series_of(b) {
+        let volume = volume.map(|v| format!(", volume {v}")).unwrap_or_default();
+        lines.push(Line::from(vec![format!("{name}{volume}").fg(Color::Magenta), "  N next volume".dim()]));
     }
     lines.push(Line::default());
     lines.push(field("Status", b.status.label().to_owned()).style(status_color(b.status)));
@@ -205,9 +238,43 @@ fn draw_detail(f: &mut Frame, app: &mut Books, area: Rect) {
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
+/// A folded series: its volumes in the library and where reading stands.
+fn draw_series_detail(f: &mut Frame, app: &mut Books, s: &series::Summary, mut inner: Rect) {
+    let current = app.series_current(s).cloned();
+    if let (Some(url), false) = (current.as_ref().and_then(|b| b.cover_url.clone()), app.cover_mode == CoverMode::Off) {
+        let rows = (inner.height / 2).min(16);
+        let graphics = matches!(app.mode, Mode::Normal | Mode::Search) && !app.covered;
+        draw_cover(f, app, &url, Rect { height: rows, ..inner }, graphics);
+        inner.y += rows + 1;
+        inner.height = inner.height.saturating_sub(rows + 1);
+    }
+    let field = |label: &str, value: String| {
+        Line::from(vec![Span::styled(format!("{label:<9}"), Style::new().dim()), Span::raw(value)])
+    };
+    let mut lines = vec![Line::from(s.name.as_str().bold().fg(ACCENT))];
+    if let Some(a) = current.as_ref().and_then(|b| b.author.clone()) {
+        lines.push(Line::from(format!("by {a}")));
+    }
+    lines.push(Line::default());
+    let here = series::range_label(s.first, s.last);
+    lines.push(field("Here", format!("{} volumes{}", s.books.len(), if here.is_empty() { here } else { format!(", {here}") })));
+    lines.push(field("Library", format!("{} volumes, {} finished", s.owned, s.finished)));
+    if let Some(b) = current.filter(|b| b.status != Status::Finished) {
+        lines.push(field("Now", b.title.clone()).style(status_color(b.status)));
+    }
+    let pages: u32 = s.books.iter().filter_map(|i| app.books.get(*i)).filter(|b| b.status == Status::Finished).filter_map(|b| b.pages).sum();
+    if pages > 0 {
+        lines.push(field("Read", format!("{pages} pages")));
+    }
+    lines.push(Line::default());
+    let fold = if s.expanded { "enter fold" } else { "enter unfold" };
+    lines.push(Line::from(format!("{fold} · N next volume").dim()));
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
 /// Draws the cover at `url` centred in `area`: as a real picture when allowed and
 /// the terminal can, else as pixel art.
-fn draw_cover(f: &mut Frame, app: &mut Books, url: &str, area: Rect, graphics: bool) {
+pub fn draw_cover(f: &mut Frame, app: &mut Books, url: &str, area: Rect, graphics: bool) {
     if area.width < 4 || area.height < 3 {
         return;
     }
@@ -246,7 +313,7 @@ fn draw_online(f: &mut Frame, app: &mut Books) {
     let screen = f.area();
     let area = popup(screen, screen.width.saturating_sub(4).min(100), screen.height.saturating_sub(2).min(26));
     f.render_widget(Clear, area);
-    let block = Block::bordered().title(" Search Open Library and Google Books ").border_style(ACCENT);
+    let block = Block::bordered().title(" Search Open Library, Google Books and Manga-Passion ").border_style(ACCENT);
     let inner = block.inner(area);
     f.render_widget(block, area);
     let Mode::Online(online) = &app.mode else { return };
@@ -262,7 +329,7 @@ fn draw_online(f: &mut Frame, app: &mut Books) {
     let hint_text = match state {
         OnlineState::Typing | OnlineState::Error(_) => "enter search · esc close",
         OnlineState::Loading => "esc close",
-        OnlineState::Results { .. } => "j/k move · enter add · / new search · esc close",
+        OnlineState::Results { .. } => "j/k move · enter add (a manga series: pick volumes) · / new search · esc close",
     };
     f.render_widget(Line::from(hint_text.dim()), hint);
 
@@ -272,12 +339,21 @@ fn draw_online(f: &mut Frame, app: &mut Books) {
         OnlineState::Error(e) => {
             f.render_widget(Paragraph::new(e.as_str().fg(Color::Red)).wrap(Wrap { trim: true }), body)
         }
-        OnlineState::Results { hits, selected, owned } => {
+        OnlineState::Results { series, hits, selected, owned } => {
             let [list, preview] = Layout::horizontal([Constraint::Min(0), Constraint::Length(24)]).areas(body);
-            let items: Vec<ListItem> = hits
+            let editions = series.iter().map(|s| {
+                let mut first = vec![Span::from("▸ ").fg(ACCENT), Span::from(s.title.as_str()).bold(), " manga series".fg(Color::Magenta)];
+                if s.complete {
+                    first.push(" complete".dim());
+                }
+                let volumes = (s.volumes > 0).then(|| format!("{} volumes", s.volumes));
+                let facts = [s.publisher.clone(), volumes, s.author.clone(), Some("Manga-Passion".into())];
+                let second = format!("  {}", facts.into_iter().flatten().collect::<Vec<_>>().join(" · "));
+                ListItem::new(vec![Line::from(first), Line::from(second.dim())])
+            });
+            let books = hits
                 .iter()
-                .enumerate()
-                .map(|(i, h)| {
+                .map(|h| {
                     let mut first = vec![Span::from(h.title.as_str()).bold()];
                     if h.format == habit_books::Format::Manga {
                         first.push(" manga".fg(Color::Magenta));
@@ -293,13 +369,20 @@ fn draw_online(f: &mut Frame, app: &mut Books) {
                         .then(|| "· Google Books".to_string());
                     let second =
                         format!("  {}", [h.author.clone(), year, google].into_iter().flatten().collect::<Vec<_>>().join(" "));
-                    let item = ListItem::new(vec![Line::from(first), Line::from(second.dim())]);
-                    if i == *selected { item.style(Style::new().bg(Color::DarkGray)) } else { item }
-                })
+                    ListItem::new(vec![Line::from(first), Line::from(second.dim())])
+                });
+            let items: Vec<ListItem> = editions
+                .chain(books)
+                .enumerate()
+                .map(|(i, item)| if i == *selected { item.style(Style::new().bg(Color::DarkGray)) } else { item })
                 .collect();
             let mut state = ratatui::widgets::ListState::default().with_selected(Some(*selected));
             f.render_stateful_widget(List::new(items), list, &mut state);
-            if let Some(url) = hits.get(*selected).and_then(|h| h.cover_url.clone()) {
+            let cover = match series.get(*selected) {
+                Some(s) => s.cover.clone(),
+                None => hits.get(*selected - series.len()).and_then(|h| h.cover_url.clone()),
+            };
+            if let Some(url) = cover {
                 draw_cover(f, app, &url, preview.inner(ratatui::layout::Margin::new(1, 0)), false);
             }
         }
@@ -324,6 +407,7 @@ pub fn hints(app: &Books) -> Vec<(&'static str, &'static str)> {
             ("n", "add"),
             ("O", "online"),
             ("e", "edit"),
+            ("N", "next vol."),
             ("S", "status"),
             ("m", "pin"),
             ("p", "page"),
@@ -466,8 +550,9 @@ fn draw_help(f: &mut Frame) {
         ("j/k home/end", "move"),
         ("/", "filter library"),
         ("n", "add a book"),
-        ("O", "add from Open Library or Google Books"),
-        ("e enter", "edit book"),
+        ("O", "add from Open Library, Google Books, Manga-Passion"),
+        ("e enter", "edit book (on a series: fold / unfold)"),
+        ("N", "add the next volume of the series"),
         ("S", "change status"),
         ("d", "delete book"),
         ("m", "pin: the next reading session is for this book"),

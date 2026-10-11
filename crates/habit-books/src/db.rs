@@ -89,14 +89,16 @@ const MIGRATIONS: &[&str] = &["CREATE TABLE settings (
     );",
     // Ratings out of 10 (`rating` stays, out of 5, for older habitfocus). Rows
     // without a score (older devices) fall back to twice their rating.
-    "ALTER TABLE books ADD COLUMN score INTEGER;"];
+    "ALTER TABLE books ADD COLUMN score INTEGER;",
+    // Volumes of a series (manga, mostly).
+    "ALTER TABLE books ADD COLUMN series TEXT; ALTER TABLE books ADD COLUMN volume INTEGER;"];
 
 const BOOK_COLUMNS: &str = "id, title, subtitle, author, isbn, olid, pages, pub_year, format, status, \
-                            rating, tags, notes, cover_url, created_at, updated_at, score";
+                            rating, tags, notes, cover_url, created_at, updated_at, score, series, volume";
 
 /// [`BOOK_COLUMNS`] as read back.
 const BOOK_SELECT: &str = "id, title, subtitle, author, isbn, olid, pages, pub_year, format, status, \
-                           COALESCE(score, rating * 2), tags, notes, cover_url, created_at, updated_at";
+                           COALESCE(score, rating * 2), tags, notes, cover_url, created_at, updated_at, series, volume";
 
 pub struct Db {
     pub(crate) conn: Connection,
@@ -161,14 +163,14 @@ impl Db {
         self.conn.execute(
             &format!(
                 "INSERT INTO books ({BOOK_COLUMNS}, deleted_at, device_id, rev)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?19, NULL, ?17, ?18)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?19, ?20, ?21, NULL, ?17, ?18)
                  ON CONFLICT(id) DO UPDATE SET
                     title = excluded.title, subtitle = excluded.subtitle, author = excluded.author,
                     isbn = excluded.isbn, olid = excluded.olid, pages = excluded.pages,
                     pub_year = excluded.pub_year, format = excluded.format, status = excluded.status,
                     rating = excluded.rating, score = excluded.score, tags = excluded.tags, notes = excluded.notes,
-                    cover_url = excluded.cover_url, updated_at = excluded.updated_at,
-                    deleted_at = NULL, device_id = excluded.device_id, rev = excluded.rev"
+                    cover_url = excluded.cover_url, series = excluded.series, volume = excluded.volume,
+                    updated_at = excluded.updated_at, deleted_at = NULL, device_id = excluded.device_id, rev = excluded.rev"
             ),
             params![
                 book.id,
@@ -190,6 +192,8 @@ impl Db {
                 self.device_id,
                 rev,
                 book.score,
+                book.series,
+                book.volume,
             ],
         )?;
         if before != Some(book.status) {
@@ -301,6 +305,8 @@ fn book_from_row(r: &Row) -> rusqlite::Result<Book> {
         tags: tags.split(',').filter(|t| !t.is_empty()).map(str::to_owned).collect(),
         notes: r.get(12)?,
         cover_url: r.get(13)?,
+        series: r.get(16)?,
+        volume: r.get(17)?,
         created_at: r.get(14)?,
         updated_at: r.get(15)?,
     })

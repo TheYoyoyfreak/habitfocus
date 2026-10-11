@@ -11,6 +11,8 @@ pub enum Field {
     Title,
     Subtitle,
     Author,
+    Series,
+    Volume,
     Pages,
     Year,
     Isbn,
@@ -25,10 +27,12 @@ pub enum Field {
 }
 
 impl Field {
-    pub const ALL: [Field; 14] = [
+    pub const ALL: [Field; 16] = [
         Field::Title,
         Field::Subtitle,
         Field::Author,
+        Field::Series,
+        Field::Volume,
         Field::Pages,
         Field::Year,
         Field::Isbn,
@@ -47,6 +51,8 @@ impl Field {
             Field::Title => "Title",
             Field::Subtitle => "Subtitle",
             Field::Author => "Author",
+            Field::Series => "Series",
+            Field::Volume => "Volume",
             Field::Pages => "Pages",
             Field::Year => "Year",
             Field::Isbn => "ISBN",
@@ -65,6 +71,7 @@ impl Field {
     pub fn placeholder(self) -> &'static str {
         match self {
             Field::Started | Field::Finished => "YYYY-MM-DD",
+            Field::Series => "e.g. Chainsaw Man (manga: from the title)",
             Field::Cover => "web address, or an image file to use (it syncs)",
             _ => "",
         }
@@ -92,7 +99,7 @@ pub struct Form {
     pub is_new: bool,
     book: Book,
     /// One buffer per entry in `Field::ALL`; unused for choice fields.
-    text: [String; 14],
+    text: [String; 16],
     /// Dates as the form opened with them, to tell whether they changed.
     dates_before: (String, String),
     pub scale: RatingScale,
@@ -108,6 +115,8 @@ impl Form {
             Field::Title => book.title.clone(),
             Field::Subtitle => opt(&book.subtitle),
             Field::Author => opt(&book.author),
+            Field::Series => opt(&book.series),
+            Field::Volume => num(book.volume.map(|v| v.to_string())),
             Field::Pages => num(book.pages.map(|p| p.to_string())),
             Field::Year => num(book.pub_year.map(|y| y.to_string())),
             Field::Isbn => opt(&book.isbn),
@@ -210,6 +219,8 @@ impl Form {
         }
         book.subtitle = opt(Field::Subtitle);
         book.author = opt(Field::Author);
+        book.series = opt(Field::Series);
+        book.volume = opt(Field::Volume).map(|s| s.parse().map_err(|_| "Volume must be a whole number")).transpose()?;
         book.pages = opt(Field::Pages).map(|s| s.parse().map_err(|_| "Pages must be a whole number")).transpose()?;
         book.pub_year = opt(Field::Year).map(|s| s.parse().map_err(|_| "Year must be a number")).transpose()?;
         book.isbn = opt(Field::Isbn);
@@ -255,7 +266,7 @@ pub fn format_date(ms: i64) -> String {
 }
 
 /// Noon of a typed `YYYY-MM-DD`, so the day is the same in every time zone nearby.
-fn parse_date(s: &str, label: &str) -> Result<Option<i64>, String> {
+pub fn parse_date(s: &str, label: &str) -> Result<Option<i64>, String> {
     if s.is_empty() {
         return Ok(None);
     }
@@ -318,6 +329,21 @@ mod tests {
         assert_eq!(book.score, 10);
         assert_eq!(book.tags, ["scifi", "classic"]);
         assert_eq!(book.author, None);
+        assert_eq!((book.series, book.volume), (None, None));
+    }
+
+    #[test]
+    fn series_and_volume_are_fields() {
+        let mut book = Book::new("Berserk 3");
+        book.series = Some("Berserk".into());
+        book.volume = Some(3);
+        let mut form = Form::new(book, false);
+        assert_eq!(form.value(Field::Series as usize), "Berserk");
+        focus(&mut form, Field::Volume);
+        form.handle_key(key(KeyCode::Backspace));
+        type_str(&mut form, "4");
+        let FormOutcome::Save(saved, _) = form.handle_key(key(KeyCode::Enter)) else { panic!() };
+        assert_eq!((saved.series.as_deref(), saved.volume), (Some("Berserk"), Some(4)));
     }
 
     #[test]

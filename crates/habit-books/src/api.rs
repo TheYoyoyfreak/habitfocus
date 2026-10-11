@@ -18,8 +18,11 @@ pub enum BooksOp {
         #[serde(default)]
         query: String,
     },
-    /// Open Library and Google Books search: unsaved books to pick from.
+    /// Open Library and Google Books search: unsaved books to pick from, and
+    /// Manga-Passion's German manga editions.
     Search { query: String },
+    /// Every volume of a Manga-Passion edition, as unsaved books.
+    Volumes { edition: u64 },
     /// Adds or updates a book (a new id adds it).
     Save { book: Box<Book> },
     Delete { id: String },
@@ -66,7 +69,11 @@ pub enum BooksOp {
 impl BooksOp {
     /// Changes the library (clients refetch afterwards).
     pub fn is_write(&self) -> bool {
-        !matches!(self, BooksOp::Library | BooksOp::List { .. } | BooksOp::Search { .. } | BooksOp::FetchCover { .. })
+        !matches!(self, BooksOp::Library
+                | BooksOp::List { .. }
+                | BooksOp::Search { .. }
+                | BooksOp::Volumes { .. }
+                | BooksOp::FetchCover { .. })
     }
 }
 
@@ -95,6 +102,9 @@ pub struct BooksReply {
     /// Search results (Open Library first, then Google Books).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hits: Vec<Book>,
+    /// Manga editions a search found (Manga-Passion).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub series: Vec<crate::mangapassion::Series>,
     /// What `import_booktrack` took over.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported: Option<ImportCounts>,
@@ -119,7 +129,7 @@ const SEARCH_LIMIT: usize = 20;
 #[cfg(feature = "store")]
 pub fn handle(db: &crate::Db, op: BooksOp) -> anyhow::Result<BooksReply> {
     use crate::import::booktrack_path;
-    use crate::{covers, googlebooks, openlibrary};
+    use crate::{covers, googlebooks, mangapassion, openlibrary, series};
     use std::path::PathBuf;
 
     let mut reply = BooksReply::default();
@@ -134,23 +144,32 @@ pub fn handle(db: &crate::Db, op: BooksOp) -> anyhow::Result<BooksReply> {
         }
         BooksOp::List { status, query } => reply.books = db.list_books(status, &query)?,
         BooksOp::Search { query } => {
-            // Both at once; either one alone is enough.
-            let (ol, gb) = std::thread::scope(|s| {
+            // All at once; any one alone is enough.
+            let (ol, gb, mp) = std::thread::scope(|s| {
                 let gb = s.spawn(|| googlebooks::search(&query, SEARCH_LIMIT));
+                let mp = s.spawn(|| mangapassion::search(&query));
                 let ol = openlibrary::search(&query, SEARCH_LIMIT);
-                (ol, gb.join().unwrap_or_else(|_| Err(anyhow::anyhow!("Google Books search crashed"))))
+                let crashed = |name: &str| anyhow::anyhow!("{name} search crashed");
+                (
+                    ol,
+                    gb.join().unwrap_or_else(|_| Err(crashed("Google Books"))),
+                    mp.join().unwrap_or_else(|_| Err(crashed("Manga-Passion"))),
+                )
             });
+            reply.series = mp.as_ref().map(Vec::clone).unwrap_or_default();
             reply.hits = match (ol, gb) {
-                (Err(e), Err(_)) => return Err(e),
+                (Err(e), Err(_)) if mp.is_err() => return Err(e),
                 (ol, gb) => googlebooks::merge(
                     ol.map(|h| h.iter().map(openlibrary::Hit::to_book).collect()).unwrap_or_default(),
                     gb.map(|h| h.iter().map(googlebooks::Volume::to_book).collect()).unwrap_or_default(),
                 ),
             };
         }
+        BooksOp::Volumes { edition } => reply.hits = mangapassion::volumes(edition)?,
         BooksOp::Save { book } => {
             let mut book = *book;
             anyhow::ensure!(!book.title.trim().is_empty(), "a book needs a title");
+            series::fill_in(&mut book);
             // A cover from a local file goes in the book, so other devices see it.
             if let Some(url) = book.cover_url.clone().filter(|u| covers::is_local(u)) {
                 book.cover_url = Some(covers::embed(&covers::path(&url))?);

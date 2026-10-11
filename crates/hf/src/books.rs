@@ -1,6 +1,6 @@
 //! `hf books`: the book library. habitd keeps it; this asks and prints.
 
-use anyhow::{anyhow, bail};
+use anyhow::{anyhow, bail, ensure};
 use chrono::{Local, NaiveDateTime, TimeZone};
 use clap::Subcommand;
 use habit_books::stats::{self, format_duration};
@@ -31,12 +31,21 @@ pub enum BooksCommand {
         #[arg(short, long, default_value = "for_later", value_parser = parse_status)]
         status: Status,
     },
-    /// Search Open Library and Google Books; add a result with --add
+    /// Search Open Library, Google Books and Manga-Passion; add a result with --add
     Search {
         query: String,
         /// Add the result with this number to the library
         #[arg(long)]
         add: Option<usize>,
+        #[arg(short, long, default_value = "for_later", value_parser = parse_status)]
+        status: Status,
+    },
+    /// Volumes of a German manga edition (its id from `search`); add some with --add
+    Volumes {
+        edition: u64,
+        /// Volumes to add: "3", "1-5" or "1-3,7"
+        #[arg(long)]
+        add: Option<String>,
         #[arg(short, long, default_value = "for_later", value_parser = parse_status)]
         status: Status,
     },
@@ -188,7 +197,8 @@ pub fn run(command: BooksCommand) -> anyhow::Result<()> {
             println!("added {} ({})", book.title, book.id);
         }
         BooksCommand::Search { query, add, status } => {
-            let hits = call(BooksOp::Search { query })?.hits;
+            let reply = call(BooksOp::Search { query })?;
+            let hits = reply.hits;
             if let Some(n) = add {
                 let mut book = hits.get(n.wrapping_sub(1)).cloned().ok_or_else(|| anyhow!("no result #{n}"))?;
                 book.status = status;
@@ -204,6 +214,36 @@ pub fn run(command: BooksCommand) -> anyhow::Result<()> {
                 let manga = if h.format == habit_books::Format::Manga { " [manga]" } else { "" };
                 let google = if is_google(h) { " [Google Books]" } else { "" };
                 println!("{:>2}. {} — {}{year}{manga}{google}", i + 1, h.title, h.author.as_deref().unwrap_or(""));
+            }
+            if !reply.series.is_empty() {
+                println!("\nManga series (hf books volumes <id> lists their volumes):");
+            }
+            for s in &reply.series {
+                let volumes = (s.volumes > 0).then(|| format!("{} volumes", s.volumes));
+                let facts: Vec<String> = [s.publisher.clone(), volumes, s.author.clone()].into_iter().flatten().collect();
+                println!("  [{}] {} — {}", s.id, s.title, facts.join(", "));
+            }
+        }
+        BooksCommand::Volumes { edition, add, status } => {
+            let volumes = call(BooksOp::Volumes { edition })?.hits;
+            let Some(add) = add else {
+                for v in &volumes {
+                    let pages = v.pages.map(|p| format!(", {p} pages")).unwrap_or_default();
+                    let year = v.pub_year.map(|y| format!(" ({y})")).unwrap_or_default();
+                    println!("{:>4}. {}{year}{pages}", v.volume.unwrap_or(0), v.title);
+                }
+                return Ok(());
+            };
+            let wanted = parse_volumes(&add)?;
+            let mut added = 0;
+            for mut book in volumes.into_iter().filter(|v| v.volume.is_some_and(|n| wanted.contains(&n))) {
+                book.status = status;
+                let book = call(BooksOp::Save { book: Box::new(book) })?.book.ok_or_else(|| anyhow!("habitd didn't save the book"))?;
+                println!("added {} ({})", book.title, book.id);
+                added += 1;
+            }
+            if added == 0 {
+                bail!("no such volumes in edition {edition}");
             }
         }
         BooksCommand::Status { book, status } => {
@@ -350,6 +390,23 @@ pub fn run(command: BooksCommand) -> anyhow::Result<()> {
 }
 
 /// Whether a search hit came from Google Books rather than Open Library.
+/// "1-3,7" → 1, 2, 3, 7.
+fn parse_volumes(s: &str) -> anyhow::Result<Vec<u32>> {
+    let mut all = Vec::new();
+    for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let bad = || anyhow!("volumes look like 3, 1-5 or 1-3,7");
+        match part.split_once('-') {
+            Some((a, b)) => {
+                let (a, b): (u32, u32) = (a.trim().parse().map_err(|_| bad())?, b.trim().parse().map_err(|_| bad())?);
+                ensure!(a <= b, "{part}: the first volume comes first");
+                all.extend(a..=b);
+            }
+            None => all.push(part.parse().map_err(|_| bad())?),
+        }
+    }
+    Ok(all)
+}
+
 fn is_google(book: &habit_books::Book) -> bool {
     book.olid.as_deref().is_some_and(|id| id.starts_with(habit_books::googlebooks::ID_PREFIX))
 }
@@ -362,6 +419,14 @@ mod tests {
         let mut b = Book::new(title);
         b.author = Some(author.into());
         b
+    }
+
+    #[test]
+    fn volume_ranges() {
+        assert_eq!(parse_volumes("1-3, 7").unwrap(), [1, 2, 3, 7]);
+        assert_eq!(parse_volumes("4").unwrap(), [4]);
+        assert!(parse_volumes("5-2").is_err());
+        assert!(parse_volumes("one").is_err());
     }
 
     #[test]

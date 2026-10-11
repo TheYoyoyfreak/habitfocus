@@ -59,6 +59,8 @@ crates/
     sync.rs                   local changes and last-write-wins merging for sync (store)
     openlibrary.rs covers.rs  Open Library search, cover cache and own images (curl; store)
     googlebooks.rs            Google Books search, merging its hits with Open Library's
+    mangapassion.rs           German manga editions and their volumes (Manga-Passion)
+    series.rs                 series and volumes: read off titles, folded library rows (pure)
     import.rs                 one-time import of a booktrack database (store)
   habitd/src/
     main.rs                   Daemon struct, event loop, request handling, config/lock loading
@@ -541,7 +543,10 @@ of Atuin's. It is opt-in: nothing happens until `hf sync register` or `hf sync l
   still written for older versions. A row without `score` (from an older version) reads as `rating * 2`
   (`COALESCE` in `db.rs`, `scoreOf` in the app). Own covers are `data:image/jpeg;base64,…` URLs in `cover_url`,
   at most about 80 KB (`covers::embed`), so they travel with their row; `covers::fetch` writes them to the cover
-  cache. `BooksOp::SetDates` (`Db::set_dates`) moves the latest reading or opens one.
+  cache. `BooksOp::SetDates` (`Db::set_dates`) moves the latest reading or opens one. `series`/`volume`
+  (migration 3) are plain synced columns; rows of older versions arrive without them (NULL), and manga without a
+  series still fold by their title (`series::series_of`). Volumes from Manga-Passion carry `olid`
+  `mp:<edition>:<volume>`, which is how `N` finds the edition again.
   Clients without a config of their own (the habitfocus_mobile app) take the newest record of all devices.
 - **Test vector** (`crypto.rs`, `sealing_matches_the_published_vector`): a fixed key, nonce and record and the `raw`
   they seal to. Other clients check against the same values; don't change them.
