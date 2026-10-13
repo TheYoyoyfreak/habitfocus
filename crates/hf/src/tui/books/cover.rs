@@ -3,6 +3,8 @@
 //! else gets pixel art: the cover shrunk to one pixel per half cell, reduced to
 //! the 6×6×6 colour cube and drawn with `▀`.
 
+use std::collections::HashMap;
+
 use image::imageops::FilterType;
 use image::{DynamicImage, Rgba, RgbaImage};
 use ratatui::buffer::Buffer;
@@ -42,15 +44,66 @@ impl CoverMode {
     }
 }
 
-/// Blocking: has habitd download the cover (unless it's cached already), then
-/// decodes it.
-pub fn load(url: &str) -> Result<DynamicImage, String> {
-    use super::Backend;
-    let path = habit_books::covers::path(url);
-    if !path.is_file() {
-        super::Ipc.call(habit_books::api::BooksOp::FetchCover { url: url.to_owned() })?;
+/// What a picture is drawn as: cover URL, columns, rows.
+pub type Key = (String, u16, u16);
+
+/// Encoded pictures, kept while they are drawn: what one frame didn't draw is
+/// dropped at the start of the next.
+pub struct Pictures<V> {
+    now: HashMap<Key, V>,
+    before: HashMap<Key, V>,
+}
+
+impl<V> Default for Pictures<V> {
+    fn default() -> Self {
+        Pictures { now: HashMap::new(), before: HashMap::new() }
     }
+}
+
+impl<V> Pictures<V> {
+    pub fn new_frame(&mut self) {
+        self.before = std::mem::take(&mut self.now);
+    }
+
+    /// The picture for `key`, from this or the last frame, else made by `make`.
+    pub fn get_or_make(&mut self, key: Key, make: impl FnOnce() -> Option<V>) -> Option<&V> {
+        if !self.now.contains_key(&key) {
+            let value = self.before.remove(&key).or_else(make)?;
+            self.now.insert(key.clone(), value);
+        }
+        self.now.get(&key)
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.now.len() + self.before.len()
+    }
+}
+
+/// The cover from the disk cache, if it's there and small: decoding a cover
+/// takes a millisecond or so, quick enough to do while drawing. A big file is
+/// left to [`download`] in the background.
+pub fn cached(url: &str) -> Option<Cover> {
+    const SMALL: u64 = 1 << 20;
+    let path = habit_books::covers::path(url);
+    let small = std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() <= SMALL);
+    small.then(|| ready(image::open(&path).map_err(|e| format!("{}: {e}", path.display()))))
+}
+
+/// Blocking: has habitd download the cover (unless it's on disk already), then
+/// decodes it.
+pub fn download(url: &str) -> Result<DynamicImage, String> {
+    use super::Backend;
+    super::Ipc.call(habit_books::api::BooksOp::FetchCover { url: url.to_owned() })?;
+    let path = habit_books::covers::path(url);
     image::open(&path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+pub fn ready(result: Result<DynamicImage, String>) -> Cover {
+    match result {
+        Ok(img) => Cover::Ready(img),
+        Err(e) => Cover::Failed(e),
+    }
 }
 
 /// Whether the terminal takes 24-bit colour; otherwise pixel art uses the 256-colour palette.

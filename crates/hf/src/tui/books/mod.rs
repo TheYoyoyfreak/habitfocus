@@ -23,7 +23,7 @@ use ratatui::widgets::TableState;
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::Protocol;
 
-use cover::{Cover, CoverMode};
+use cover::{Cover, CoverMode, Pictures};
 use form::{Form, FormOutcome};
 use inbox::Assign;
 use reading::LogForm;
@@ -123,14 +123,18 @@ pub struct Books {
     /// Something of habitfocus' own (a popup) lies over the pane, so no
     /// graphics: they would cover it.
     pub covered: bool,
-    /// Last encoded graphic and what it showed (url, cols, rows).
-    pub graphic: Option<((String, u16, u16), Protocol)>,
-    /// Last pixel-art rendering, same key.
-    pub pixel: Option<((String, u16, u16), image::RgbaImage)>,
+    /// Encoded graphics on screen.
+    pub graphic: Pictures<Protocol>,
+    /// Pixel-art renderings on screen.
+    pub pixel: Pictures<image::RgbaImage>,
     /// Index into `TABS`.
     pub tab: usize,
     /// The Insights view instead of the library.
     pub insights: bool,
+    /// The library as a grid of covers instead of the table, for this session.
+    pub grid: bool,
+    /// First grid row on screen.
+    pub grid_top: usize,
     pub query: String,
     /// Books on the current tab.
     pub books: Vec<Book>,
@@ -181,10 +185,12 @@ impl Books {
             picker: picker.filter(|p| p.protocol_type() != ProtocolType::Halfblocks).cloned(),
             truecolor: cover::truecolor(),
             covered: false,
-            graphic: None,
-            pixel: None,
+            graphic: Pictures::default(),
+            pixel: Pictures::default(),
             tab: 0,
             insights: false,
+            grid: false,
+            grid_top: 0,
             query: String::new(),
             books: Vec::new(),
             rows: Vec::new(),
@@ -270,22 +276,48 @@ impl Books {
         if self.insights {
             return None;
         }
-        match self.selected_row()? {
-            Row::Series(s) => self.series_current(s).and_then(|b| b.cover_url.clone()),
-            Row::Book { .. } => self.selected().and_then(|b| b.cover_url.clone()),
+        self.row_cover(self.selected_row()?)
+    }
+
+    /// A row's cover: the book's, or for a series its current volume's.
+    pub fn row_cover(&self, row: &Row) -> Option<String> {
+        match row {
+            Row::Series(s) => self.series_current(s)?.cover_url.clone(),
+            Row::Book { index, .. } => self.books.get(*index)?.cover_url.clone(),
         }
     }
 
-    /// Starts loading the wanted cover if it isn't known yet.
+    /// Takes the wanted cover from the disk cache, or starts downloading it.
     pub fn request_cover(&mut self) {
-        let Some(url) = self.cover_url() else { return };
+        if let Some(url) = self.cover_url() {
+            self.load_cover(url, usize::MAX);
+        }
+    }
+
+    /// The same for the grid's tiles on screen, downloading a few at a time; the
+    /// next frame asks for the rest.
+    pub fn request_covers(&mut self, urls: impl IntoIterator<Item = String>) {
+        for url in urls {
+            self.load_cover(url, 4);
+        }
+    }
+
+    /// Downloads only while fewer than `downloads` are under way.
+    fn load_cover(&mut self, url: String, downloads: usize) {
         if self.covers.contains_key(&url) || !self.network {
+            return;
+        }
+        if let Some(cover) = cover::cached(&url) {
+            self.covers.insert(url, cover);
+            return;
+        }
+        if self.covers.values().filter(|c| matches!(c, Cover::Loading)).count() >= downloads {
             return;
         }
         self.covers.insert(url.clone(), Cover::Loading);
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let result = cover::load(&url);
+            let result = cover::download(&url);
             let _ = tx.send(Done::Cover { url, result });
         });
     }
@@ -303,11 +335,7 @@ impl Books {
     pub fn finish(&mut self, done: Done) {
         match done {
             Done::Cover { url, result } => {
-                let cover = match result {
-                    Ok(img) => Cover::Ready(img),
-                    Err(e) => Cover::Failed(e),
-                };
-                self.covers.insert(url, cover);
+                self.covers.insert(url, cover::ready(result));
             }
             Done::Search { seq, result } => {
                 let owned = self.all_books.iter().filter_map(|b| b.olid.clone()).collect();
@@ -657,6 +685,10 @@ impl Books {
             KeyCode::Char('/') => self.mode = Mode::Search,
             KeyCode::Char('O') => {
                 self.mode = Mode::Online(Box::new(Online { query: String::new(), state: OnlineState::Typing, seq: 0 }))
+            }
+            KeyCode::Char('G') => {
+                self.grid = !self.grid;
+                self.set_message(if self.grid { "Grid view" } else { "List view" });
             }
             KeyCode::Char('C') => {
                 self.cover_mode = self.cover_mode.next();

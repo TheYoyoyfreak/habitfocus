@@ -7,7 +7,7 @@ use chrono::{Local, TimeZone};
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell, Clear, List, ListItem, Paragraph, Row, Table, Tabs, Wrap};
+use ratatui::widgets::{Block, BorderType, Cell, Padding, Clear, List, ListItem, Paragraph, Row, Table, Tabs, Wrap};
 use ratatui::Frame;
 
 use ratatui_image::Resize;
@@ -21,6 +21,8 @@ use habit_books::series::{self, Row as SeriesRow};
 pub const ACCENT: Color = Color::Cyan;
 
 pub fn draw(f: &mut Frame, area: Rect, app: &mut Books) {
+    app.graphic.new_frame();
+    app.pixel.new_frame();
     app.request_cover();
     let filter = matches!(app.mode, Mode::Search) || !app.query.is_empty();
     let [tabs, hint, body, footer] = Layout::vertical([
@@ -38,7 +40,11 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut Books) {
         insights::draw(f, app, body);
     } else {
         let [list, detail] = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(body);
-        draw_table(f, app, list);
+        if app.grid {
+            draw_grid(f, app, list);
+        } else {
+            draw_table(f, app, list);
+        }
         draw_detail(f, app, detail);
     }
     if filter {
@@ -99,13 +105,19 @@ fn draw_tabs(f: &mut Frame, app: &Books, area: Rect) {
     f.render_widget(Span::styled(live, Style::new().fg(Color::Black).bg(Color::Yellow)), live_area);
 }
 
-fn draw_table(f: &mut Frame, app: &mut Books, area: Rect) {
+/// The library's frame; `None` once it said that there's nothing to list.
+fn library_block(f: &mut Frame, app: &Books, area: Rect) -> Option<Block<'static>> {
     let block = Block::bordered().title(format!(" {} ", tab_label(app.tab_status())));
     if app.books.is_empty() {
         let hint = if app.query.is_empty() { "No books here yet. n adds one, O finds one online." } else { "No matches." };
         f.render_widget(Paragraph::new(hint).dim().block(block), area);
-        return;
+        return None;
     }
+    Some(block)
+}
+
+fn draw_table(f: &mut Frame, app: &mut Books, area: Rect) {
+    let Some(block) = library_block(f, app, area) else { return };
     let rows: Vec<Row<'static>> = app.rows.iter().map(|row| {
         let (index, nested) = match row {
             SeriesRow::Book { index, nested } => (*index, *nested),
@@ -148,6 +160,90 @@ fn draw_table(f: &mut Frame, app: &mut Books, area: Rect) {
         .highlight_symbol("▌")
         .block(block);
     f.render_stateful_widget(table, area, &mut app.table);
+}
+
+/// Size of a grid tile in cells: a cover with the title under it.
+const TILE: (u16, u16) = (16, 13);
+
+/// The rows as tiles, left to right; scrolls by whole lines of tiles to keep
+/// the selection on screen.
+fn draw_grid(f: &mut Frame, app: &mut Books, area: Rect) {
+    let Some(block) = library_block(f, app, area) else { return };
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let (tile_w, tile_h) = TILE;
+    let cols = (inner.width / tile_w).max(1);
+    let lines = usize::from((inner.height / tile_h).max(1));
+    let selected = app.table.selected().unwrap_or(0);
+    let line = selected / usize::from(cols);
+    app.grid_top = app.grid_top.clamp(line.saturating_sub(lines - 1), line);
+
+    let first = app.grid_top * usize::from(cols);
+    let shown = first..app.rows.len().min(first + lines * usize::from(cols));
+    if app.cover_mode != CoverMode::Off {
+        let urls: Vec<String> = app.rows[shown.clone()].iter().filter_map(|row| app.row_cover(row)).collect();
+        app.request_covers(urls);
+    }
+    let graphics = matches!(app.mode, Mode::Normal | Mode::Search) && !app.covered;
+    let left = inner.x + inner.width.saturating_sub(tile_w * cols) / 2;
+    for i in shown {
+        let n = (i - first) as u16;
+        let tile = Rect::new(left + n % cols * tile_w, inner.y + n / cols * tile_h, tile_w, tile_h).intersection(inner);
+        draw_tile(f, app, i, tile, i == selected, graphics);
+    }
+}
+
+fn draw_tile(f: &mut Frame, app: &mut Books, i: usize, area: Rect, selected: bool, graphics: bool) {
+    let block = if selected {
+        Block::bordered().border_type(BorderType::Rounded).border_style(ACCENT)
+    } else {
+        Block::new().padding(Padding::uniform(1))
+    };
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let [cover_area, _, caption] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(1), Constraint::Length(2)]).areas(inner);
+
+    let row = app.rows[i].clone();
+    let url = app.row_cover(&row).filter(|_| app.cover_mode != CoverMode::Off);
+    match url.as_ref().map(|url| (url, app.covers.get(url))) {
+        Some((url, Some(Cover::Ready(_)))) => draw_cover(f, app, url, cover_area, graphics),
+        state => {
+            // A blank cover: two cells per three rows keep a book's proportions.
+            let width = (cover_area.height * 4 / 3).min(cover_area.width);
+            let [blank] = Layout::horizontal([Constraint::Length(width)]).flex(Flex::Center).areas(cover_area);
+            let mark = if matches!(state, Some((_, None | Some(Cover::Loading)))) { "…" } else { "" };
+            let text = Paragraph::new(mark).centered().dim();
+            f.render_widget(text.block(Block::bordered().border_type(BorderType::Rounded).dim()), blank);
+        }
+    }
+
+    let title = if selected { Style::new().bold() } else { Style::new() };
+    let lines = match &row {
+        SeriesRow::Series(s) => {
+            let fold = if s.expanded { "▾ " } else { "▸ " };
+            vec![
+                Line::from(vec![fold.fg(ACCENT), Span::styled(s.name.clone(), title)]),
+                Line::from(format!("{}/{} ✓", s.finished, s.owned)).green(),
+            ]
+        }
+        SeriesRow::Book { index, nested } => {
+            let b = &app.books[*index];
+            let mark = if app.pin.as_ref().is_some_and(|p| p.book_id == b.id) { "◉ " } else { "" };
+            let name = match (nested, b.volume) {
+                (true, Some(v)) => format!("Vol. {v}"),
+                _ => b.title.clone(),
+            };
+            vec![Line::from(vec![mark.fg(Color::Yellow), Span::styled(name, title)])]
+        }
+    };
+    // A title may take both lines; a series keeps its count on the second.
+    let caption_text = Paragraph::new(lines).centered();
+    if matches!(row, SeriesRow::Series(_)) {
+        f.render_widget(caption_text, caption);
+    } else {
+        f.render_widget(caption_text.wrap(Wrap { trim: true }), caption);
+    }
 }
 
 fn draw_detail(f: &mut Frame, app: &mut Books, area: Rect) {
@@ -289,11 +385,9 @@ pub fn draw_cover(f: &mut Frame, app: &mut Books, url: &str, area: Rect, graphic
     };
     let key = (url.to_owned(), area.width, area.height);
     if let (Some(picker), true, CoverMode::Auto) = (&app.picker, graphics, app.cover_mode) {
-        if app.graphic.as_ref().is_none_or(|(k, _)| *k != key) {
-            let size = ratatui::layout::Size::new(area.width, area.height);
-            app.graphic = picker.new_protocol(img.clone(), size, Resize::Fit(None)).ok().map(|p| (key.clone(), p));
-        }
-        if let Some((_, protocol)) = &app.graphic {
+        let size = ratatui::layout::Size::new(area.width, area.height);
+        let made = app.graphic.get_or_make(key.clone(), || picker.new_protocol(img.clone(), size, Resize::Fit(None)).ok());
+        if let Some(protocol) = made {
             let size = protocol.size();
             let x = area.x + area.width.saturating_sub(size.width) / 2;
             let target = Rect { x, width: size.width.min(area.width), height: size.height.min(area.height), ..area };
@@ -301,10 +395,7 @@ pub fn draw_cover(f: &mut Frame, app: &mut Books, url: &str, area: Rect, graphic
             return;
         }
     }
-    if app.pixel.as_ref().is_none_or(|(k, _)| *k != key) {
-        app.pixel = Some((key, cover::pixelate(img, area.width, area.height)));
-    }
-    if let Some((_, image)) = &app.pixel {
+    if let Some(image) = app.pixel.get_or_make(key, || Some(cover::pixelate(img, area.width, area.height))) {
         f.render_widget(PixelArt { image, truecolor: app.truecolor }, area);
     }
 }
@@ -560,6 +651,7 @@ fn draw_help(f: &mut Frame) {
         ("g", "log a past session"),
         ("v", "sessions of this book"),
         ("I", "inbox: choose the book for reading sessions"),
+        ("G", "grid of covers / list"),
         ("C", "cover display: auto / pixel / off"),
     ];
     let area = popup(f.area(), 64, KEYS.len() as u16 + 4);
@@ -663,6 +755,62 @@ mod tests {
         let pixels = buf.content().iter().filter(|c| c.symbol() == "▀" && c.fg == Color::Rgb(255, 0, 0)).count()
             + buf.content().iter().filter(|c| c.symbol() == "▀" && c.fg == Color::Indexed(196)).count();
         assert!(pixels > 20, "cover drawn as pixel art");
+    }
+
+    #[test]
+    fn grid_shows_tiles_and_scrolls_to_the_selection() {
+        use super::super::tests::{books_with, press};
+        let list = [("Dune", Status::Reading), ("Emma", Status::Reading), ("Ivanhoe", Status::Reading), ("Ulysses", Status::Reading)];
+        let mut app = books_with(&list);
+        press(&mut app, "G");
+        assert!(app.grid);
+        let order: Vec<String> = app.rows.iter().map(|r| match r {
+            SeriesRow::Book { index, .. } => app.books[*index].title.clone(),
+            SeriesRow::Series(_) => unreachable!(),
+        }).collect();
+        // 100 columns leave room for three tiles in a line, 24 rows for one line.
+        let screen = render(&mut app);
+        assert!(order[..3].iter().all(|t| screen.contains(t.as_str())));
+        assert!(!screen.contains(order[3].as_str()), "the fourth tile is on the next line");
+        assert!(!screen.contains("Author"), "no table header");
+
+        // j steps through the tiles one by one, the grid follows.
+        press(&mut app, "jjj");
+        assert_eq!(app.selected().unwrap().title, order[3]);
+        let screen = render(&mut app);
+        assert!(screen.contains(order[3].as_str()) && !screen.contains(order[2].as_str()));
+        assert_eq!(app.grid_top, 1);
+        press(&mut app, "k");
+        render(&mut app);
+        assert_eq!(app.grid_top, 0);
+
+        press(&mut app, "G");
+        assert!(render(&mut app).contains("Author"), "back to the table");
+    }
+
+    #[test]
+    fn grid_draws_every_cover_on_screen_and_forgets_the_rest() {
+        use super::super::tests::{books_from, press};
+        let db = Db::open_in_memory().unwrap();
+        for title in ["Dune", "Emma"] {
+            let mut b = Book::new(title);
+            b.status = Status::Reading;
+            b.cover_url = Some(format!("https://example.org/{title}.jpg"));
+            db.save_book(&mut b).unwrap();
+        }
+        let mut app = books_from(db);
+        let red = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(20, 30, image::Rgba([255, 0, 0, 255])));
+        for title in ["Dune", "Emma"] {
+            app.finish(super::super::Done::Cover { url: format!("https://example.org/{title}.jpg"), result: Ok(red.clone()) });
+        }
+        press(&mut app, "G");
+        render(&mut app);
+        // Both tiles, and the selected book once more in the details.
+        assert_eq!(app.pixel.len(), 3);
+        press(&mut app, "G");
+        render(&mut app);
+        render(&mut app);
+        assert_eq!(app.pixel.len(), 1, "only the details' cover is left");
     }
 
     fn app_with_sessions() -> Books {
