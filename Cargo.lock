@@ -749,7 +749,7 @@ dependencies = [
 
 [[package]]
 name = "habit-books"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -763,7 +763,7 @@ dependencies = [
 
 [[package]]
 name = "habit-core"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "regex",
  "serde",
@@ -773,7 +773,7 @@ dependencies = [
 
 [[package]]
 name = "habit-ipc"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "habit-books",
  "habit-core",
@@ -783,7 +783,7 @@ dependencies = [
 
 [[package]]
 name = "habitd"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -850,7 +850,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hf"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "chrono",
