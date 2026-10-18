@@ -101,6 +101,9 @@ pub enum BooksCommand {
         /// Default: ~/.local/share/booktrack/booktrack.db
         path: Option<String>,
     },
+    /// Send the whole library to the sync server again, books from other
+    /// devices too (after moving to a new server)
+    Resync,
 }
 
 #[derive(Subcommand)]
@@ -384,6 +387,10 @@ pub fn run(command: BooksCommand) -> anyhow::Result<()> {
                 n.pending,
                 reply.books.len()
             );
+        }
+        BooksCommand::Resync => {
+            let n = call(BooksOp::Resync)?.requeued.unwrap_or_default();
+            println!("{n} rows go out again with the next sync (`hf sync now` sends them right away)");
         }
     }
     Ok(())

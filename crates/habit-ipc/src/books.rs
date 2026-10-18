@@ -18,6 +18,7 @@ mod tests {
             BooksOp::Assign { pending: "p".into(), book: "b".into(), page_to: Some(3) },
             BooksOp::Pin { book: None },
             BooksOp::ImportBooktrack { path: None },
+            BooksOp::Resync,
         ];
         for op in ops {
             let req = Request::Books { op };

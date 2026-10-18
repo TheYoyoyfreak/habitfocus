@@ -330,6 +330,10 @@ hf sync logout
 
 Keep the sync key safe: without it, nobody (you included) can read the data on the server.
 
+Each device sends only what it recorded itself. When you move to a new server, books that came from a device that
+doesn't join the new one would stay behind: `hf books resync` on a device that has them sends its whole library
+again, theirs included. History stays with the device that recorded it.
+
 Once other devices have synced, the TUI shows how sync goes in its header and sidebar, and `v` in Insights steps
 through the devices: this one, each other device, and **all devices**. All devices adds the time *at any screen*:
 two devices used at the same time count once there, while the table sums them. `hf web` has the same device row
@@ -419,6 +423,7 @@ hf books sessions [dune] [--json]
 hf books stats
 hf books inbox                                    # sessions waiting for a book: assign 1 dune -p 120, discard 1
 hf books import-booktrack [PATH]                  # take over booktrack's library (run once)
+hf books resync                                   # send the whole library to the sync server again
 ```
 
 The library lives in `~/.local/state/habitfocus/books.db`. Searches and covers need `curl`.

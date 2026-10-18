@@ -166,6 +166,28 @@ impl Db {
         Ok(changed)
     }
 
+    /// Gives every row a new `rev`, rows from other devices too, so the next
+    /// sync sends the whole library again (for a new sync server, where only
+    /// this device's own changes would go otherwise). The rows themselves stay
+    /// as they are, so devices that have them already keep theirs. Returns how
+    /// many rows will go out.
+    pub fn requeue_all(&self) -> anyhow::Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut count = 0;
+        for table in SyncTable::ALL {
+            let mut stmt = tx.prepare(&format!("SELECT id FROM {} ORDER BY rev, id", table.tag()))?;
+            let ids: Vec<String> = stmt.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
+            drop(stmt);
+            for id in &ids {
+                let rev = self.next_rev()?;
+                tx.execute(&format!("UPDATE {} SET rev = ?1 WHERE id = ?2", table.tag()), rusqlite::params![rev, id])?;
+            }
+            count += ids.len();
+        }
+        tx.commit()?;
+        Ok(count)
+    }
+
     /// A sync cursor (kept in settings).
     pub fn sync_value(&self, key: &str) -> anyhow::Result<Option<String>> {
         self.setting(&format!("sync:{key}"))
@@ -336,6 +358,30 @@ mod tests {
         let (_, b) = devices();
         let rows = [serde_json::json!({"id": "x"}), serde_json::json!("nonsense"), serde_json::json!({"id": "y", "title": ["?"]})];
         assert_eq!(b.merge_remote(SyncTable::Books, &rows).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_requeued_library_goes_out_again_and_changes_nothing_where_it_is() {
+        let (a, b) = devices();
+        let mut dune = Book::new("Dune");
+        a.save_book(&mut dune).unwrap();
+        let mut emma = Book::new("Emma");
+        b.save_book(&mut emma).unwrap();
+        ship(&a, &b);
+        let sent = b.local_changes(SyncTable::Books, 0, 1000).unwrap();
+        assert_eq!(sent.len(), 1, "only its own book");
+        let cursor = sent[0].0;
+
+        assert_eq!(b.requeue_all().unwrap(), 2);
+        let again = b.local_changes(SyncTable::Books, cursor, 1000).unwrap();
+        assert_eq!(again.len(), 2, "Dune from a goes out too");
+        assert_eq!(again.iter().find(|(_, r)| r["id"] == dune.id.as_str()).unwrap().1["device_id"], "dev-a", "as it was");
+
+        let (c, _) = devices();
+        let c = Db { device_id: "dev-c".into(), ..c };
+        ship(&b, &c);
+        assert_eq!(c.list_books(None, "").unwrap().len(), 2);
+        assert_eq!(ship(&b, &a), 1, "a only gets Emma, Dune stays as it is");
     }
 
     #[test]

@@ -64,6 +64,9 @@ pub enum BooksOp {
         #[serde(default)]
         path: Option<String>,
     },
+    /// Sends the whole library again with the next sync, rows from other
+    /// devices too (after moving to a new sync server).
+    Resync,
 }
 
 impl BooksOp {
@@ -108,6 +111,9 @@ pub struct BooksReply {
     /// What `import_booktrack` took over.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported: Option<ImportCounts>,
+    /// How many rows `resync` queued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requeued: Option<usize>,
 }
 
 /// Rows newly taken over by `import_booktrack` (rows already here are skipped).
@@ -215,6 +221,7 @@ pub fn handle(db: &crate::Db, op: BooksOp) -> anyhow::Result<BooksReply> {
             reply.imported = Some(counts);
             reply.books = db.list_books(None, "")?;
         }
+        BooksOp::Resync => reply.requeued = Some(db.requeue_all()?),
     }
     Ok(reply)
 }
