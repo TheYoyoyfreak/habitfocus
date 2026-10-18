@@ -144,6 +144,9 @@ kind = "timer"
 target = "20m"
 strictness = "soft"
 reward = { groups = ["social"], duration = "1h", mode = "bank" }
+# Each day's minutes of finished sessions (every device) can go to a webhook,
+# e.g. one of habitsfirst, as {"value": <minutes>, "day": "YYYY-MM-DD"}:
+# webhook = "https://…"
 
 [habits.wiki]
 name = "Learn something"

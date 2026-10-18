@@ -1,6 +1,6 @@
 //! Publishes this device's habits for clients that have no config of their own
-//! (the habitfocus_mobile app): names, kinds, targets, which habits are
-//! reading, and when the day starts. Only habits: blocks, rules and rewards
+//! (the habitfocus_mobile app): names, kinds, targets, webhooks, which habits
+//! are reading, and when the day starts. Only habits: blocks, rules and rewards
 //! stay on the device.
 //!
 //! A record with tag `habits` goes out whenever the summary changed (its hash
@@ -31,6 +31,7 @@ pub fn summary(config: &Config) -> serde_json::Value {
                 "unit": habit.unit,
                 "daily_limit": habit.daily_limit,
                 "strictness": habit.strictness,
+                "webhook": habit.webhook,
             })
         })
         .collect();

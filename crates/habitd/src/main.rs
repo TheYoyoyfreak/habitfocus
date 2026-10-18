@@ -12,6 +12,7 @@ mod sync;
 mod settings;
 mod terminal;
 mod update;
+mod webhooks;
 
 use anyhow::Context;
 use habit_core::duration::{format_duration, format_duration_long};
@@ -202,6 +203,8 @@ struct Daemon {
     compositor: Option<Compositor>,
     /// The books thread, once started.
     books: Option<std::sync::mpsc::Sender<books::Job>>,
+    /// The webhook thread, once started (needs `history.db`).
+    webhooks: Option<std::sync::mpsc::Sender<webhooks::Job>>,
 }
 
 impl Daemon {
@@ -266,6 +269,7 @@ impl Daemon {
             archive_failing: false,
             compositor: Compositor::detect(),
             books: None,
+            webhooks: None,
         })
     }
 
@@ -310,6 +314,21 @@ impl Daemon {
             }
             Err(_) => {}
         }
+        if records.iter().any(|r| matches!(r, habit_core::archive::Record::Session(_))) {
+            self.send_webhooks();
+        }
+    }
+
+    /// Has the webhook thread send what's due, with the config in force.
+    fn send_webhooks(&self) {
+        let Some(webhooks) = &self.webhooks else { return };
+        let config = self.engine.config();
+        let hooks = config
+            .habits
+            .iter()
+            .filter_map(|(id, habit)| Some(webhooks::Hook { habit: id.clone(), url: habit.webhook.clone()? }))
+            .collect();
+        let _ = webhooks.send(webhooks::Job { hooks, day_start: config.general.day_start });
     }
 
     fn write_heartbeat(&mut self, now: u64, clean_shutdown: bool) {
@@ -356,6 +375,7 @@ impl Daemon {
             let effects = self.engine.reload(config, now);
             self.config_text = file;
             self.apply(effects, now);
+            self.send_webhooks();
             return Ok("Config reloaded".into());
         };
         let resolved = resolve_locked(&baseline, &file).map_err(|e| format!("invalid config: {e}"))?;
@@ -368,6 +388,7 @@ impl Daemon {
         let effects = self.engine.reload(resolved.config, now);
         self.config_text = resolved.baseline;
         self.apply(effects, now);
+        self.send_webhooks();
         Ok("Config reloaded (stricter changes apply during the commitment)".into())
     }
 
@@ -441,6 +462,7 @@ impl Daemon {
         let effects = self.engine.reload(config, now);
         self.config_text = updated;
         self.apply(effects, now);
+        self.send_webhooks();
         Ok(())
     }
 
@@ -686,6 +708,10 @@ async fn main() -> anyhow::Result<()> {
         None => books::Device { id: "local".into(), name: archive::hostname() },
     };
     daemon.books = Some(books::spawn(habit_ipc::books_path_for(&daemon.state_path), device, tx.clone()));
+    if daemon.archive.is_some() {
+        daemon.webhooks = Some(webhooks::spawn(habit_ipc::archive_path_for(&daemon.state_path)));
+        daemon.send_webhooks();
+    }
 
     eprintln!("habitd: listening on {}", socket_path.display());
     loop {
@@ -746,6 +772,7 @@ async fn main() -> anyhow::Result<()> {
                             let effects = daemon.engine.remote_session(&session, &device, now);
                             daemon.apply(effects, now);
                         }
+                        daemon.send_webhooks();
                     }
                     Event::UpdateChecked(result) => {
                         if let Some(update) = update_checker.finished(result) {

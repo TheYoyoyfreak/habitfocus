@@ -514,6 +514,10 @@ pub struct Habit {
     /// Required, except for `passive` habits that are only tracked.
     #[serde(default)]
     pub reward: Reward,
+    /// A link that gets each day's minutes of finished sessions (timed habits),
+    /// e.g. a habitsfirst webhook.
+    #[serde(default)]
+    pub webhook: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -869,6 +873,14 @@ impl Config {
                     "habit {id:?}: needs a reward, e.g. reward = {{ groups = [\"social\"], duration = \"30m\" }}"
                 ));
             }
+            if let Some(url) = &habit.webhook {
+                if !habit.kind.is_timed() {
+                    return Err(format!("habit {id:?}: only apps and timer habits have minutes to send to a webhook"));
+                }
+                if !(url.starts_with("https://") || url.starts_with("http://")) {
+                    return Err(format!("habit {id:?}: webhook must be a link starting with https://"));
+                }
+            }
             if habit.kind == HabitKind::Timer && !habit.allow.is_empty() {
                 return Err(format!(
                     "habit {id:?}: timer habits count while `hf tui` is focused and take no allow rules"
@@ -1206,6 +1218,21 @@ mod tests {
         assert!(group.matches_domain("youtube.com"));
         assert!(group.matches_domain("m.youtube.com"));
         assert!(!group.matches_domain("notyoutube.com"));
+    }
+
+    #[test]
+    fn webhooks_need_a_link_and_a_timed_habit() {
+        let habit = |fields: &str| {
+            Config::from_toml(&format!(
+                "[groups.social]\n[habits.read]\n{fields}\nreward = {{ groups = [\"social\"], duration = \"1h\" }}"
+            ))
+        };
+        let ok = habit("kind = \"timer\"\ntarget = \"20m\"\nwebhook = \"https://example.org/hook/1\"").unwrap();
+        assert_eq!(ok.habits["read"].webhook.as_deref(), Some("https://example.org/hook/1"));
+        let bare = habit("kind = \"timer\"\ntarget = \"20m\"\nwebhook = \"example.org/hook\"").unwrap_err();
+        assert!(bare.contains("https://"), "{bare}");
+        let manual = habit("kind = \"manual\"\nwebhook = \"https://example.org/hook/1\"").unwrap_err();
+        assert!(manual.contains("apps and timer"), "{manual}");
     }
 
     #[test]

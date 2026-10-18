@@ -119,7 +119,7 @@ fn applies(key: &str, kind: &str) -> bool {
     let timed = matches!(kind, "apps" | "timer");
     match key {
         "target" => timed || kind == "passive",
-        "strictness" | "on_target" => timed,
+        "strictness" | "on_target" | "webhook" => timed,
         "allow" => matches!(kind, "apps" | "passive"),
         "goal" | "unit" => kind == "counter",
         "daily_limit" => !timed,
@@ -448,7 +448,7 @@ impl Editor {
     /// what it had when opened, and fills in what the kind needs.
     fn set_habit_kind(&mut self, kind: &str) {
         self.change("kind", Some(kind.into()));
-        for key in ["target", "strictness", "on_target", "allow", "goal", "unit", "daily_limit"] {
+        for key in ["target", "strictness", "on_target", "allow", "goal", "unit", "daily_limit", "webhook"] {
             if !applies(key, kind) {
                 self.table.remove(key);
             } else if let (None, Some(original)) = (self.table.get(key), self.original.get(key)) {

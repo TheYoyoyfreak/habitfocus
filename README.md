@@ -480,6 +480,22 @@ Nothing is earned in between. `hf continue` (or `c` in the TUI) keeps going afte
 Progress of stopped sessions resets when a new day starts (`day_start`, default midnight, changeable in the TUI
 settings with `o`).
 
+### Webhooks
+
+A timed habit can send its minutes to a link, e.g. a habitsfirst webhook, so a habit there counts what you read
+here:
+
+```toml
+[habits.book]
+# …
+webhook = "https://…"
+```
+
+After every finished session (and when sessions of your other devices arrive by sync), habitd posts each changed
+day of the last week as `{"value": <minutes>, "day": "YYYY-MM-DD"}`: the minutes of completed and stopped sessions
+of that habit on every device, by `day_start`. The value replaces the day's number there, so a day sent again never
+counts twice. With sync, the phone app sends them too after each sync, so they arrive while the desktop is off.
+
 ## Status
 
 - [x] Engine, niri and Hyprland adapters, idle detection, app/process blocking, soft/strict sessions, CLI

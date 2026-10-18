@@ -267,6 +267,27 @@ impl Archive {
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
+
+    /// Sessions of every device that finished at or after `from`, oldest first.
+    pub fn sessions_since(&self, from: u64) -> anyhow::Result<Vec<HistoryEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT habit, started_ms, finished_ms, focused_ms, outcome FROM sessions
+             WHERE finished_ms >= ?1 ORDER BY finished_ms, id",
+        )?;
+        let mut query = stmt.query(params![from as i64])?;
+        let mut sessions = Vec::new();
+        while let Some(r) = query.next()? {
+            let Some(outcome) = from_name::<Outcome>(&r.get::<_, String>(4)?) else { continue };
+            sessions.push(HistoryEntry {
+                habit: r.get(0)?,
+                started_at: r.get::<_, i64>(1)? as u64,
+                finished_at: r.get::<_, i64>(2)? as u64,
+                focused_ms: r.get::<_, i64>(3)? as u64,
+                outcome,
+            });
+        }
+        Ok(sessions)
+    }
 }
 
 /// What sync needs: this device's rows by cursor, other devices' rows by uid.
