@@ -11,6 +11,7 @@ pub mod ui;
 mod volumes;
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use habit_books::api::{BooksOp, BooksReply};
@@ -32,6 +33,11 @@ use volumes::{Outcome as VolumesOutcome, Volumes};
 /// Where the library is kept.
 pub trait Backend {
     fn call(&self, op: BooksOp) -> Result<BooksReply, String>;
+
+    /// Where the view (`G`) is remembered between runs; `None` forgets it.
+    fn view_path(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// habitd, over its socket.
@@ -45,6 +51,33 @@ impl Backend for Ipc {
         }
         Ok(response.books.unwrap_or_default())
     }
+
+    fn view_path(&self) -> Option<PathBuf> {
+        Some(habit_ipc::state_path().with_file_name("hf.json"))
+    }
+}
+
+/// Whether the file at `path` asks for the grid; anything unreadable is the list.
+fn load_grid(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|prefs| prefs.get("books_grid")?.as_bool())
+        .unwrap_or(false)
+}
+
+/// Writes `grid` into the file at `path`, keeping whatever else it holds.
+fn save_grid(path: &Path, grid: bool) -> anyhow::Result<()> {
+    let mut prefs = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text).ok())
+        .unwrap_or_default();
+    prefs.insert("books_grid".into(), grid.into());
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, serde_json::to_string_pretty(&prefs)? + "\n")?;
+    Ok(())
 }
 
 /// Status filters, `f` steps through them: one per status, then everything.
@@ -131,7 +164,8 @@ pub struct Books {
     pub tab: usize,
     /// The Insights view instead of the library.
     pub insights: bool,
-    /// The library as a grid of covers instead of the table, for this session.
+    /// The library as a grid of covers instead of the table, remembered
+    /// through `Backend::view_path`.
     pub grid: bool,
     /// First grid row on screen.
     pub grid_top: usize,
@@ -211,6 +245,7 @@ impl Books {
             rating: Default::default(),
             message: None,
         };
+        books.grid = books.backend.view_path().is_some_and(|path| load_grid(&path));
         books.reload_or_report(None);
         // Start on "Reading" if there is something to read, else on "All".
         if books.books.is_empty() {
@@ -689,6 +724,11 @@ impl Books {
             KeyCode::Char('G') => {
                 self.grid = !self.grid;
                 self.set_message(if self.grid { "Grid view" } else { "List view" });
+                if let Some(path) = self.backend.view_path() {
+                    if let Err(e) = save_grid(&path, self.grid) {
+                        self.message = Some((format!("Couldn't remember the view: {e:#}"), true));
+                    }
+                }
             }
             KeyCode::Char('C') => {
                 self.cover_mode = self.cover_mode.next();
@@ -824,6 +864,22 @@ pub(crate) mod tests {
     fn starts_on_reading_tab_or_all_when_empty() {
         assert_eq!(books_with(&[("Dune", Status::Reading)]).tab, 0);
         assert_eq!(books_with(&[("Emma", Status::Finished)]).tab, 4);
+    }
+
+    #[test]
+    fn grid_is_remembered_next_to_other_settings() {
+        let dir = std::env::temp_dir().join(format!("hf-view-{}", std::process::id()));
+        let path = dir.join("hf.json");
+        assert!(!load_grid(&path), "no file is the list");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, r#"{ "other": 1 }"#).unwrap();
+        save_grid(&path, true).unwrap();
+        assert!(load_grid(&path));
+        let prefs: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(prefs["other"], 1, "the rest stays");
+        save_grid(&path, false).unwrap();
+        assert!(!load_grid(&path));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -382,7 +382,7 @@ later), which gives progress, pages per hour and the time left.
 In the Books pane: `f`/`F` steps through the statuses (reading, finished, for later, abandoned, all), `i` shows
 reading insights, `/` filters, `n` adds a book, `O` adds one from Open Library, `e` edits, `S` changes the status,
 `d` deletes, `m` pins, `N` adds the next volume of a series, `p` sets the page, `g` logs a session you read without a habit, `v` lists the book's
-sessions, `I` opens the inbox, `G` shows the library as a grid of covers instead of a list (until hf exits), `C`
+sessions, `I` opens the inbox, `G` shows the library as a grid of covers instead of a list (remembered in `~/.local/state/habitfocus/hf.json`), `C`
 switches covers (picture / pixel art / off), `?` lists the keys. Covers show as
 pictures in kitty, foot (sixel), WezTerm and iTerm2, elsewhere as pixel art; they're cached in
 `~/.cache/habitfocus/covers`.
