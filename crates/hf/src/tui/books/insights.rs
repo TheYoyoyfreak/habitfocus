@@ -93,11 +93,53 @@ fn axis(bar: (u16, u16), labels: impl IntoIterator<Item = (usize, String)>) -> L
     Line::from(out).dim()
 }
 
-/// Splits off the last row of a block's inner area for an axis.
-fn chart_areas(block: &Block, area: Rect) -> (Rect, Rect) {
-    let inner = block.inner(area);
-    let [bars, axis] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
-    (bars, axis)
+/// Width of the y scale left of a chart: a label and its tick.
+const SCALE_WIDTH: u16 = 5;
+
+/// Splits a block's inner area into the y scale, the bars and the axis row
+/// below them (the scale column leaves the axis labels under their bars).
+fn scaled_chart_areas(block: &Block, area: Rect) -> (Rect, Rect, Rect) {
+    let [scale, rest] = Layout::horizontal([Constraint::Length(SCALE_WIDTH), Constraint::Fill(1)]).areas(block.inner(area));
+    let [bars, axis] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(rest);
+    let [scale, _] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(scale);
+    (scale, bars, axis)
+}
+
+/// The top of the y scale in minutes: a round value at or above the largest
+/// bar, with a round half too.
+fn scale_top(max_ms: i64) -> u64 {
+    const STEPS: [u64; 14] = [10, 20, 30, 40, 60, 90, 120, 180, 240, 360, 480, 720, 960, 1440];
+    let max = (max_ms.max(0) as u64).div_ceil(60_000);
+    STEPS.into_iter().find(|step| *step >= max).unwrap_or(max)
+}
+
+/// Minutes as a short scale label: 45m, 2h, 1h30.
+fn short_minutes(min: u64) -> String {
+    match (min / 60, min % 60) {
+        (0, m) => format!("{m}m"),
+        (h, 0) => format!("{h}h"),
+        (h, m) => format!("{h}h{m:02}"),
+    }
+}
+
+/// The y scale for bars scaled to `top` minutes in `height` rows: the top,
+/// the half (where a half-height bar ends) and 0.
+fn scale(top: u64, height: u16) -> Vec<Line<'static>> {
+    let w = usize::from(SCALE_WIDTH - 1);
+    let mut rows: Vec<String> = (0..height).map(|_| format!("{:>w$}│", "")).collect();
+    let mut mark = |row: u16, min: u64| {
+        if let Some(line) = rows.get_mut(usize::from(row)) {
+            *line = format!("{:>w$}┤", short_minutes(min));
+        }
+    };
+    if height >= 4 {
+        mark(height - height / 2, top / 2);
+    }
+    if height >= 2 {
+        mark(height - 1, 0);
+    }
+    mark(0, top);
+    rows.into_iter().map(|row| Line::from(row).dim()).collect()
 }
 
 fn minutes(ms: i64) -> u64 {
@@ -106,13 +148,15 @@ fn minutes(ms: i64) -> u64 {
 
 fn draw_daily(f: &mut Frame, ins: &Insights, area: Rect) {
     let block = Block::bordered().title(" Recent days ");
-    let (bars_area, axis_area) = chart_areas(&block, area);
+    let (scale_area, bars_area, axis_area) = scaled_chart_areas(&block, area);
     f.render_widget(block, area);
     // Fewer days rather than bars without gaps when the panel is narrow.
     let days = &ins.daily[ins.daily.len().saturating_sub(usize::from(bars_area.width).div_ceil(2))..];
     let fit = fit_bars(bars_area.width, days.len().max(1) as u16);
+    let top = scale_top(days.iter().map(|d| d.1).max().unwrap_or(0));
     let bars: Vec<Bar> = days.iter().map(|(_, ms)| Bar::new(minutes(*ms)).text_value(String::new())).collect();
-    f.render_widget(BarChart::vertical(bars).bar_width(fit.0).bar_gap(fit.1).bar_style(ACCENT), bars_area);
+    f.render_widget(BarChart::vertical(bars).bar_width(fit.0).bar_gap(fit.1).bar_style(ACCENT).max(top), bars_area);
+    f.render_widget(Paragraph::new(scale(top, scale_area.height)), scale_area);
     // Day of month every week, counted back from today.
     let last = days.len().saturating_sub(1);
     let labels = days.iter().enumerate().filter(|(i, _)| (last - i).is_multiple_of(7)).map(|(i, (d, _))| (i, d.format("%d.%m").to_string()));
@@ -141,11 +185,16 @@ fn draw_weekdays(f: &mut Frame, ins: &Insights, area: Rect) {
 
 fn draw_hours(f: &mut Frame, ins: &Insights, area: Rect) {
     let block = Block::bordered().title(" Time of day ");
-    let (bars_area, axis_area) = chart_areas(&block, area);
+    let (scale_area, bars_area, axis_area) = scaled_chart_areas(&block, area);
     f.render_widget(block, area);
     let fit = fit_bars(bars_area.width, 24);
+    let top = scale_top(ins.by_hour.iter().copied().max().unwrap_or(0));
     let bars: Vec<Bar> = ins.by_hour.iter().map(|ms| Bar::new(minutes(*ms)).text_value(String::new())).collect();
-    f.render_widget(BarChart::vertical(bars).bar_width(fit.0).bar_gap(fit.1).bar_style(Color::Magenta), bars_area);
+    f.render_widget(
+        BarChart::vertical(bars).bar_width(fit.0).bar_gap(fit.1).bar_style(Color::Magenta).max(top),
+        bars_area,
+    );
+    f.render_widget(Paragraph::new(scale(top, scale_area.height)), scale_area);
     f.render_widget(axis(fit, [0, 6, 12, 18].map(|h| (h, format!("{h}h")))), axis_area);
 }
 
@@ -210,6 +259,17 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_scale_has_round_steps() {
+        assert_eq!(scale_top(0), 10);
+        assert_eq!(scale_top(25 * 60_000 + 1), 30);
+        assert_eq!(scale_top(61 * 60_000), 90);
+        assert_eq!(scale_top(30 * 3_600_000), 1800);
+        assert_eq!([45, 60, 90, 1440].map(short_minutes), ["45m", "1h", "1h30", "24h"]);
+        let lines: Vec<String> = scale(60, 6).iter().map(Line::to_string).collect();
+        assert_eq!(lines, ["  1h┤", "    │", "    │", " 30m┤", "    │", "  0m┤"]);
     }
 
     #[test]
