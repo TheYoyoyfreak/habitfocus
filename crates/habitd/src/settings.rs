@@ -16,12 +16,13 @@ pub const EDITABLE: &[&str] = &[
     "terminal_programs",
     "auto_categories",
     "update_check",
+    "web",
     "books",
     "book_rating",
 ];
 
 /// Settings that are true or false.
-const SWITCHES: &[&str] = &["notifications", "terminal_programs", "auto_categories", "update_check", "books"];
+const SWITCHES: &[&str] = &["notifications", "terminal_programs", "auto_categories", "update_check", "web", "books"];
 
 /// Where a setting lives: `books` is `enabled` and `book_rating` is `rating`
 /// under `[books]`, the rest is in `[general]`.
@@ -104,6 +105,10 @@ domains = ["reddit.com"]
         let (updated, config) = apply(&updated, "auto_categories", "false").unwrap();
         assert!(updated.contains("auto_categories = false"));
         assert!(!config.general.auto_categories);
+
+        let (updated, config) = apply(&updated, "web", "on").unwrap();
+        assert!(updated.contains("web = true"));
+        assert!(config.general.web);
     }
 
     #[test]

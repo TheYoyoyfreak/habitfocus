@@ -1,36 +1,47 @@
-//! `hf web`: the insights page in a browser. A small HTTP server on
-//! 127.0.0.1 that serves one compiled-in page and passes read-only requests
-//! through to habitd. Nothing on the page can change state: `api_request`
-//! only knows the requests that read.
+//! The insights page in a browser, served by `hf web` or by habitd itself
+//! with `general.web`. A small HTTP server on 127.0.0.1 that serves one
+//! compiled-in page and passes read-only requests through to habitd. Nothing
+//! on the page can change state: `api_request` only knows the requests that
+//! read.
 
-use anyhow::Context;
-use habit_ipc::Request;
+use crate::Request;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-pub const DEFAULT_PORT: u16 = 5601;
+pub use habit_core::config::DEFAULT_WEB_PORT as DEFAULT_PORT;
 
 const PAGE: &str = include_str!("web/index.html");
 /// Longest request head read before giving up.
 const MAX_HEAD: usize = 8 * 1024;
 
-pub fn run(port: u16, open: bool) -> anyhow::Result<()> {
-    let listener =
-        TcpListener::bind(("127.0.0.1", port)).with_context(|| format!("can't listen on 127.0.0.1:{port}"))?;
-    let url = format!("http://127.0.0.1:{port}");
-    println!("habitfocus insights on {url} (ctrl-c stops)");
-    if open {
-        if let Err(e) = std::process::Command::new("xdg-open").arg(&url).spawn() {
-            eprintln!("hf: couldn't open a browser: {e}");
+pub fn url(port: u16) -> String {
+    format!("http://127.0.0.1:{port}")
+}
+
+pub fn bind(port: u16) -> std::io::Result<TcpListener> {
+    TcpListener::bind(("127.0.0.1", port))
+}
+
+/// Answers connections, one thread each, until `stop` is set (checked after
+/// each connection; `wake` gets the loop there).
+pub fn serve(listener: TcpListener, port: u16, stop: &AtomicBool) {
+    for stream in listener.incoming() {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        if let Ok(stream) = stream {
+            std::thread::spawn(move || {
+                let _ = handle(stream, port);
+            });
         }
     }
-    for stream in listener.incoming().flatten() {
-        std::thread::spawn(move || {
-            let _ = handle(stream, port);
-        });
-    }
-    Ok(())
+}
+
+/// Unblocks `serve` on `port` after its `stop` was set.
+pub fn wake(port: u16) {
+    let _ = TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_secs(1));
 }
 
 fn handle(mut stream: TcpStream, port: u16) -> std::io::Result<()> {
@@ -111,7 +122,7 @@ fn respond(head: &Head, port: u16) -> (u16, &'static str, String) {
     let Some(request) = path.strip_prefix("/api/").and_then(|cmd| api_request(cmd, query)) else {
         return (404, "text/plain", "not found".into());
     };
-    match habit_ipc::request(&request) {
+    match crate::request(&request) {
         Ok(response) => (200, "application/json", serde_json::to_string(&response).expect("serializes")),
         Err(e) => (503, "application/json", serde_json::json!({ "ok": false, "error": e }).to_string()),
     }

@@ -80,7 +80,7 @@ fn reward_rate(habit: &Habit) -> Option<f64> {
 /// the user. Empty means `new` is equally strict or stricter.
 pub fn weakenings(baseline: &Config, new: &Config) -> Vec<String> {
     // `app_names`, `app_categories`, `category_rules`, `sound`, `terminals`,
-    // `terminal_programs`, `auto_categories` and `update_check` don't change what is required or
+    // `terminal_programs`, `auto_categories`, `update_check` and `web` don't change what is required or
     // blocked (only how screen time is labelled), so they never weaken anything. Neither does
     // `[books]`: it only records reading sessions of habits that count as before.
     let mut out = Vec::new();

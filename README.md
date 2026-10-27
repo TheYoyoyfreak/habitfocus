@@ -295,7 +295,9 @@ the total and the chart follow. `enter` keeps the filter, `esc` clears it.
 
 ### Insights in the browser
 
-`hf web` serves a read-only page on `http://127.0.0.1:5601` (`--port` for another, `--open` opens it). It looks like
+`hf web` serves a read-only page on `http://127.0.0.1:5601` (`--port` for another, `--open` opens it). To have it
+there all the time, turn on *Insights in the browser* in the TUI settings (`o`) or set `web = true` under
+`[general]`: habitd then serves the page itself while it runs (on `web_port`, 5601 by default). It looks like
 the TUI and shows what doesn't fit in a terminal:
 
 - **Timeline**: every visit of a day on a time axis, one lane per habit, category or app (`g`), like ActivityWatch.

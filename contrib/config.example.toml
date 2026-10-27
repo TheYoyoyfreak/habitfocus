@@ -36,6 +36,10 @@ auto_categories = true
 # habitd looks for a new release on GitHub once a day; `hf tui` and
 # `hf status` then mention it, and `hf update` installs it.
 update_check = true
+# habitd serves the insights page (`hf web`) itself while it runs, so it's
+# always on http://localhost:5601 (toggle it in the TUI settings with `o`).
+web = false
+web_port = 5601
 
 # ---- Block groups -------------------------------------------------------
 # Everything in a group stays blocked until you spend credit on it.

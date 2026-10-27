@@ -276,6 +276,11 @@ pub struct SettingsView {
     pub auto_categories: bool,
     #[serde(default)]
     pub update_check: bool,
+    /// habitd serves the insights page on 127.0.0.1:`web_port`.
+    #[serde(default)]
+    pub web: bool,
+    #[serde(default)]
+    pub web_port: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

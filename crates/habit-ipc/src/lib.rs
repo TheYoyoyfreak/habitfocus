@@ -5,6 +5,7 @@
 
 pub mod books;
 pub mod update;
+pub mod web;
 
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};

@@ -50,6 +50,8 @@ crates/
   habit-ipc/src/lib.rs        Request/Response types, paths, blocking client helpers
   habit-ipc/src/books.rs      the `books` request (types from habit-books)
   habit-ipc/src/update.rs     latest GitHub release (through curl), version comparison
+  habit-ipc/src/web.rs        insights page server on 127.0.0.1, read-only API passed through to habitd
+  habit-ipc/src/web/index.html  the insights page (inline CSS/JS/SVG, compiled in)
   habit-books/src/            the book library; without the `store` feature only model, stats and api types
     model.rs                  Book, Session, Reading, Pending, Pin; ids of habit sessions
     stats.rs                  per-book stats and reading insights (pure)
@@ -72,6 +74,7 @@ crates/
     procscan.rs               /proc scan to terminate blocked processes
     terminal.rs               the program in front in the focused terminal (/proc, tmux)
     update.rs                 daily release check, handed to the engine for snapshots
+    web.rs                    serves the insights page with `general.web`
     settings.rs               editing [general] in config.toml with toml_edit
     config_edit.rs            reading and editing [groups.*] / [habits.*] entries for the TUI forms
     heartbeat.rs              boot id, CLOCK_MONOTONIC, shutdown detection
@@ -89,8 +92,6 @@ crates/
     setup.rs                  `hf setup`: config, systemd unit for the habitd next to hf, native host
     update.rs                 `hf update`: runs the newest release's install.sh for this prefix
     stats_view.rs             day grid and heatmap helpers shared by CLI and TUI
-    web.rs                    `hf web`: HTTP server on 127.0.0.1, read-only API passed through to habitd
-    web/index.html            the insights page (inline CSS/JS/SVG, compiled into hf)
     tui/mod.rs                terminal setup, event loop, snapshot stream, focus reporting
     tui/app.rs                TUI state machine and key handling (no terminal I/O)
     tui/ui.rs                 frame (header, sidebar/tabs, footer) and shared widgets
@@ -616,9 +617,15 @@ on the socket, keeping partial lines). Shell plugins run it once.
   every 2 s while focused; settings open counts as unfocused. Inside tmux without `focus-events on`, focus reporting
   is disabled and the TUI shows a warning (otherwise the timer would count while the user is elsewhere).
 
-### Web page (`web.rs`, `web/index.html`)
+### Web page (`habit-ipc/src/web.rs`, `web/index.html`)
 
-`hf web` is one more client: a `std::net` HTTP server (no dependencies, one thread per connection, GET only,
+The page's server lives in `habit-ipc` so both `hf web` and habitd (with `general.web`) can run it. habitd's
+`web::Server::poll` runs after every loop pass and starts, stops or moves it to match the config; it runs on a
+thread of its own and asks habitd over the socket like any client. Stopping sets a flag and connects once to wake
+the accept loop. When the port is taken (e.g. by `hf web`), habitd tries again every 30 s; `hf web` in turn
+points at the running page when habitd has the port.
+
+It is one more client: a `std::net` HTTP server (no dependencies, one thread per connection, GET only,
 `Connection: close`) bound to 127.0.0.1. `/` serves `web/index.html`, compiled in with `include_str!`; `/api/<cmd>`
 maps the query to a `Request` in `api_request` and returns habitd's `Response` as JSON (503 when habitd is
 unreachable). `api_request` is a **whitelist of requests that only read**; that's what keeps the page read-only, so

@@ -1899,6 +1899,8 @@ impl Engine {
                 terminal_programs: self.config.general.terminal_programs,
                 auto_categories: self.config.general.auto_categories,
                 update_check: self.config.general.update_check,
+                web: self.config.general.web,
+                web_port: self.config.general.web_port,
             },
         }
     }

@@ -89,12 +89,13 @@ pub const SETTINGS: &[Setting] = &[
     Setting { key: "terminal_programs", label: "Screen time per terminal program", hint: "nvim, claude… instead of the terminal; enter toggles" },
     Setting { key: "auto_categories", label: "Group terminals and browsers", hint: "categories Terminal and Browser; enter toggles" },
     Setting { key: "update_check", label: "Check for new versions", hint: "once a day on GitHub; enter toggles" },
+    Setting { key: "web", label: "Insights in the browser", hint: "hf web served by habitd, always up; enter toggles" },
     Setting { key: "books", label: "Book library", hint: "the Books pane; reading habits go in [books] habits; enter toggles" },
     Setting { key: "book_rating", label: "Book ratings", hint: "five stars or ten points, on every device; enter toggles" },
 ];
 
 /// Settings that are on or off: enter toggles them.
-const SWITCHES: &[&str] = &["notifications", "terminal_programs", "auto_categories", "update_check", "books"];
+const SWITCHES: &[&str] = &["notifications", "terminal_programs", "auto_categories", "update_check", "web", "books"];
 
 fn on_off(on: bool) -> String {
     if on { "on" } else { "off" }.to_string()
@@ -111,6 +112,8 @@ pub fn setting_value(snapshot: &Snapshot, key: &str) -> String {
         "terminal_programs" => on_off(s.terminal_programs),
         "auto_categories" => on_off(s.auto_categories),
         "update_check" => on_off(s.update_check),
+        "web" if s.web => format!("on, localhost:{}", s.web_port),
+        "web" => on_off(false),
         "books" => match &snapshot.books {
             Some(view) if view.hint.is_some() => "on, no reading habit".into(),
             view => on_off(view.is_some()),
@@ -1142,7 +1145,7 @@ pub(crate) mod tests {
         );
         assert_eq!(app.popup, Some(Popup::Settings { index: 0, editing: None }));
 
-        for _ in 0..12 {
+        for _ in 0..13 {
             app.handle_key(key(KeyCode::Down));
         }
         assert_eq!(
@@ -1153,6 +1156,11 @@ pub(crate) mod tests {
         assert_eq!(
             app.handle_key(key(KeyCode::Enter)),
             Action::Send(Request::SetSetting { key: "books".into(), value: "on".into() })
+        );
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Action::Send(Request::SetSetting { key: "web".into(), value: "on".into() })
         );
         app.handle_key(key(KeyCode::Up));
         assert_eq!(

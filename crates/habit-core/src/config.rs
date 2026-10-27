@@ -169,10 +169,16 @@ pub struct General {
     pub auto_categories: bool,
     /// habitd looks for a newer release on GitHub once a day.
     pub update_check: bool,
+    /// habitd serves the insights page (`hf web`) on 127.0.0.1:`web_port`.
+    pub web: bool,
+    pub web_port: u16,
     /// Sound when a timed habit reaches its target: a sound name like
     /// "complete", a path to a file, or "" for silence.
     pub sound: String,
 }
+
+/// Port of the insights page.
+pub const DEFAULT_WEB_PORT: u16 = 5601;
 
 /// Terminal emulators known out of the box.
 pub const DEFAULT_TERMINALS: &[&str] = &[
@@ -267,6 +273,8 @@ impl Default for General {
             terminal_programs: true,
             auto_categories: true,
             update_check: true,
+            web: false,
+            web_port: DEFAULT_WEB_PORT,
         }
     }
 }

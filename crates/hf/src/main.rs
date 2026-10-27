@@ -5,7 +5,6 @@ mod stats_view;
 mod sync;
 mod tui;
 mod update;
-mod web;
 
 use anyhow::{bail, Context};
 use clap::{Parser, Subcommand};
@@ -13,7 +12,7 @@ use habit_core::config::{HabitKind, RewardMode, Strictness};
 use habit_core::duration::{format_duration, format_duration_long, parse_duration};
 use habit_core::snapshot::PauseReason;
 use habit_core::Snapshot;
-use habit_ipc::{Request, Response};
+use habit_ipc::{web, Request, Response};
 use serde_json::json;
 
 #[derive(Parser)]
@@ -216,7 +215,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Command::Tui => tui::run()?,
-        Command::Web { port, open } => web::run(port, open)?,
+        Command::Web { port, open } => run_web(port, open)?,
         Command::Events { limit, json } => {
             let events = call(Request::Events { limit })?.events.context("missing events")?;
             if json {
@@ -375,6 +374,30 @@ fn watch_reconnecting() -> ! {
         print(r#"{"connected":false}"#);
         std::thread::sleep(RETRY);
     }
+}
+
+/// `hf web`: serves the page until ctrl-c. When the port is taken, e.g. by
+/// habitd with `general.web`, the page is most likely already there.
+fn run_web(port: u16, open: bool) -> anyhow::Result<()> {
+    let url = web::url(port);
+    let listener = match web::bind(port) {
+        Ok(listener) => Some(listener),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => None,
+        Err(e) => return Err(e).with_context(|| format!("can't listen on 127.0.0.1:{port}")),
+    };
+    match &listener {
+        Some(_) => println!("habitfocus insights on {url} (ctrl-c stops)"),
+        None => println!("127.0.0.1:{port} is in use, most likely by habitd (`web = true`): {url}"),
+    }
+    if open {
+        if let Err(e) = std::process::Command::new("xdg-open").arg(&url).spawn() {
+            eprintln!("hf: couldn't open a browser: {e}");
+        }
+    }
+    if let Some(listener) = listener {
+        web::serve(listener, port, &std::sync::atomic::AtomicBool::new(false));
+    }
+    Ok(())
 }
 
 fn parse_local_datetime(text: &str) -> anyhow::Result<u64> {

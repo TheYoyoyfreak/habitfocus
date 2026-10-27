@@ -12,6 +12,7 @@ mod sync;
 mod settings;
 mod terminal;
 mod update;
+mod web;
 mod webhooks;
 
 use anyhow::Context;
@@ -693,6 +694,7 @@ async fn main() -> anyhow::Result<()> {
     let mut ticks: u64 = 0;
     let mut terminal_watch = terminal::Watch::default();
     let mut update_checker = update::Checker::default();
+    let mut web_server = web::Server::default();
     // Sync reads and writes history.db through a connection of its own.
     let sync = daemon.archive.is_some().then(|| {
         let archive_path = habit_ipc::archive_path_for(&daemon.state_path);
@@ -806,6 +808,7 @@ async fn main() -> anyhow::Result<()> {
         terminal_watch.poll(&daemon.engine, is_tick && ticks.is_multiple_of(TERMINAL_CHECK_EVERY_TICKS), &tx);
         update_checker.poll(daemon.engine.config().general.update_check, &tx);
         idle_watch.poll(daemon.engine.config().general.idle_timeout, &tx);
+        web_server.poll(daemon.engine.config().general.web, daemon.engine.config().general.web_port);
 
         let snapshot = daemon.engine.snapshot(now);
         let time_update = is_tick && daemon.engine.is_time_sensitive(now);
