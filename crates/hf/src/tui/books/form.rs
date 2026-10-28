@@ -188,13 +188,8 @@ impl Form {
         match self.field() {
             Field::Format => self.book.format = next(&Format::ALL, self.book.format, step),
             Field::Status => self.book.status = next(&Status::ALL, self.book.status, step),
-            Field::Rating => {
-                self.book.score = match self.scale {
-                    RatingScale::Points => (i32::from(self.book.score) + step).rem_euclid(11) as u8,
-                    // Whole stars; a half star (from points) rounds up first.
-                    RatingScale::Stars => (i32::from(self.book.score.div_ceil(2)) + step).rem_euclid(6) as u8 * 2,
-                }
-            }
+            // One point, or half a star, per step.
+            Field::Rating => self.book.score = (i32::from(self.book.score) + step).rem_euclid(11) as u8,
             _ => {}
         }
     }
@@ -318,7 +313,7 @@ mod tests {
         focus(&mut form, Field::Status);
         form.handle_key(key(KeyCode::Left)); // ForLater -> Finished
         focus(&mut form, Field::Rating);
-        form.handle_key(key(KeyCode::Left)); // 0 -> 5
+        form.handle_key(key(KeyCode::Left)); // 0 -> 5 stars
         focus(&mut form, Field::Tags);
         type_str(&mut form, "scifi, , classic");
         let FormOutcome::Save(book, dates) = form.handle_key(key(KeyCode::Enter)) else { panic!("not saved") };
@@ -373,8 +368,16 @@ mod tests {
         assert_eq!(form.value(Field::Rating as usize), "8/10");
         let mut form = Form::new(book, false);
         focus(&mut form, Field::Rating);
-        form.handle_key(key(KeyCode::Right)); // 3.5 stars -> 4 -> 5
-        assert_eq!(form.value(Field::Rating as usize), "★★★★★");
+        form.handle_key(key(KeyCode::Right)); // 3.5 stars -> 4
+        assert_eq!(form.value(Field::Rating as usize), "★★★★☆");
+        form.handle_key(key(KeyCode::Right));
+        assert_eq!(form.value(Field::Rating as usize), "★★★★½");
+        form.handle_key(key(KeyCode::Left));
+        form.handle_key(key(KeyCode::Left));
+        assert_eq!(form.value(Field::Rating as usize), "★★★½☆");
+        form.handle_key(key(KeyCode::Right));
+        form.handle_key(key(KeyCode::Right));
+        form.handle_key(key(KeyCode::Right));
         form.handle_key(key(KeyCode::Right));
         assert_eq!(form.value(Field::Rating as usize), "–");
     }
