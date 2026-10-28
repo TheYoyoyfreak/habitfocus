@@ -583,7 +583,7 @@ impl Books {
         self.pending = library.pending;
         self.suggested = library.suggested;
         self.all_books = library.books;
-        self.reading = self.all_books.iter().filter(|b| b.status == Status::Reading).cloned().collect();
+        self.reading = self.all_books.iter().filter(|b| b.status == Status::Reading && b.reads_with_pages()).cloned().collect();
         self.titles = self.all_books.iter().map(|b| (b.id.clone(), b.title.clone())).collect();
         let all: Vec<Book> = self.all_books.iter().filter(|b| matches_query(b, &self.query)).cloned().collect();
         for (count, tab) in self.counts.iter_mut().zip(TABS) {
@@ -692,6 +692,9 @@ impl Books {
             KeyCode::Char('i') => self.insights = !self.insights,
             KeyCode::Char('f') => self.switch_tab((self.tab + 1) % TABS.len())?,
             KeyCode::Char('F') => self.switch_tab((self.tab + TABS.len() - 1) % TABS.len())?,
+            KeyCode::Char('g' | 'm' | 'p') if self.selected().is_some_and(|b| !b.reads_with_pages()) => {
+                self.set_message("Audiobooks have no sessions or pages: mark them reading and finished")
+            }
             KeyCode::Char('g') => self.open_log(),
             KeyCode::Char('v') if self.selected().is_some() => {
                 self.mode = Mode::Sessions { selected: 0, confirm_delete: false }

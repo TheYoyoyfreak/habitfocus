@@ -152,8 +152,9 @@ impl Db {
         }
     }
 
+    /// The books being read that reading sessions can go to (no audiobooks).
     pub fn reading_books(&self) -> anyhow::Result<Vec<Book>> {
-        self.list_books(Some(Status::Reading), "")
+        Ok(self.list_books(Some(Status::Reading), "")?.into_iter().filter(Book::reads_with_pages).collect())
     }
 
     /// Best guess for a session without a book: the pinned book, else the
@@ -167,7 +168,7 @@ impl Db {
             .conn
             .query_row(
                 "SELECT s.book_id FROM reading_sessions s JOIN books b ON b.id = s.book_id
-                 WHERE s.deleted_at IS NULL AND b.deleted_at IS NULL AND b.status = 'reading'
+                 WHERE s.deleted_at IS NULL AND b.deleted_at IS NULL AND b.status = 'reading' AND b.format != 'audiobook'
                  ORDER BY s.ended_at DESC LIMIT 1",
                 [],
                 |r| r.get(0),
@@ -276,5 +277,19 @@ mod tests {
         // Another device recorded it with a book: the waiting entry goes away.
         assert!(db.resolve_pending_ref(&p.external_ref).unwrap());
         assert!(db.list_pending().unwrap().is_empty());
+    }
+
+    #[test]
+    fn audiobooks_take_no_sessions() {
+        let db = Db::open_in_memory().unwrap();
+        let mut heard = Book::new("Heard");
+        heard.status = Status::Reading;
+        heard.format = crate::model::Format::Audiobook;
+        db.save_book(&mut heard).unwrap();
+        assert_eq!(db.suggested_book().unwrap(), None);
+        assert!(matches!(db.record_habit_session("read", 1_000, 61_000, 60_000).unwrap(), Recorded::Pending(_)));
+        let dune = book(&db, "Dune", Status::Reading);
+        assert_eq!(db.suggested_book().unwrap(), Some(dune.clone()));
+        assert!(matches!(db.record_habit_session("read", 100_000, 160_000, 60_000).unwrap(), Recorded::Assigned { book_id, .. } if book_id == dune));
     }
 }

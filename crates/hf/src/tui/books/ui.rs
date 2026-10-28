@@ -287,7 +287,9 @@ fn draw_detail(f: &mut Frame, app: &mut Books, area: Rect) {
         _ => {}
     }
     let st = app.book_stats(&b.id, b.pages);
-    if let (Some(cur), Some(total)) = (st.current_page, b.pages.filter(|p| *p > 0)) {
+    // Audiobooks show only when they were started and finished.
+    let paged = b.reads_with_pages();
+    if let (true, Some(cur), Some(total)) = (paged, st.current_page, b.pages.filter(|p| *p > 0)) {
         let ratio = (f64::from(cur) / f64::from(total)).min(1.0);
         let filled = (ratio * 16.0).round() as usize;
         lines.push(Line::from(vec![
@@ -296,14 +298,14 @@ fn draw_detail(f: &mut Frame, app: &mut Books, area: Rect) {
             Span::styled("━".repeat(16 - filled), Style::new().fg(Color::DarkGray)),
             Span::raw(format!(" {cur}/{total} · {:.0}%", ratio * 100.0)),
         ]));
-    } else if let Some(cur) = st.current_page {
+    } else if let Some(cur) = st.current_page.filter(|_| paged) {
         lines.push(field("Page", cur.to_string()));
     }
     if st.sessions > 0 {
         let plural = if st.sessions == 1 { "" } else { "s" };
         lines.push(field("Time", format!("{} in {} session{plural}", format_duration(st.total_ms), st.sessions)));
     }
-    if let Some(pace) = st.pace_pph {
+    if let Some(pace) = st.pace_pph.filter(|_| paged) {
         let left = st.remaining_ms.filter(|ms| *ms > 0).map(|ms| format!(" · ~{} left", format_duration(ms)));
         lines.push(field("Pace", format!("{pace:.0} pages/h{}", left.unwrap_or_default())));
     }
@@ -314,7 +316,7 @@ fn draw_detail(f: &mut Frame, app: &mut Books, area: Rect) {
         lines.push(Line::from("◉ pinned: the next reading session goes here".fg(Color::Yellow)));
     }
     lines.push(field("Format", b.format.as_str().to_owned()));
-    if let Some(p) = b.pages {
+    if let Some(p) = b.pages.filter(|_| paged) {
         lines.push(field("Pages", p.to_string()));
     }
     if let Some(y) = b.pub_year {

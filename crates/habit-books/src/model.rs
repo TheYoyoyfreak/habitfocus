@@ -94,6 +94,12 @@ pub struct Book {
 }
 
 impl Book {
+    /// Whether reading sessions and pages go to the book: audiobooks are only
+    /// marked reading and finished, as they are listened to on the way.
+    pub fn reads_with_pages(&self) -> bool {
+        self.format != Format::Audiobook
+    }
+
     pub fn new(title: impl Into<String>) -> Book {
         Book {
             id: uuid::Uuid::now_v7().to_string(),

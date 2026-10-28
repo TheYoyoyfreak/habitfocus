@@ -25,13 +25,13 @@ pub struct Assign {
 }
 
 impl Books {
-    /// Books to choose from: the ones being read, or every book if none is.
+    /// Books to choose from: the ones being read, or every book if none is (never audiobooks).
     pub fn assign_books(&self) -> Vec<&Book> {
         let reading: Vec<&Book> = self.reading.iter().collect();
         if !reading.is_empty() {
             return reading;
         }
-        self.all_books.iter().collect()
+        self.all_books.iter().filter(|b| b.reads_with_pages()).collect()
     }
 
     /// Opens the dialog for the oldest waiting session, preselecting the likely book.
